@@ -1,0 +1,19 @@
+id: rust-addition
+prompt: |
+  Fix the implementation of `add` so the existing test passes. Keep the patch
+  focused and do not weaken or remove the test.
+verify:
+  commands:
+    - program: cargo
+      args: [test, --all-targets]
+limits:
+  timeout_seconds: 120
+  max_changed_files: 2
+  max_diff_lines: 40
+forbidden:
+  commands:
+    - git push
+    - cargo publish
+  paths:
+    - .git
+    - .env

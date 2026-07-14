@@ -1,0 +1,56 @@
+# PatchArena repository configuration.
+#
+# Copy this file to `patcharena.toml` only when configuring a repository
+# manually. `patcharena init` creates the same schema without overwriting an
+# existing configuration. Paths are portable, repository-relative paths.
+
+schema_version = 1
+
+[paths]
+state_dir = ".patcharena"
+tasks_dir = ".patcharena/tasks"
+runs_dir = ".patcharena/runs"
+groups_dir = ".patcharena/groups"
+
+[defaults]
+# Project numeric values are execution-time safety ceilings and are copied into
+# new tasks by `task add`. A task may choose a stricter value, not a looser one.
+# Per-agent wall-clock deadline:
+timeout_seconds = 600
+
+# Combined stdout and stderr bytes retained for each launched process.
+max_output_bytes = 10485760
+
+# Patch-size ceilings. Exceeding either makes the run unsuccessful.
+max_changed_files = 8
+max_diff_lines = 500
+
+# Only these variables may be copied from PatchArena's parent environment into
+# child processes. Adding credentials, tokens, or agent sockets widens the
+# security boundary. HOME can expose user-level tool configuration; use a clean
+# home directory when evaluating untrusted inputs.
+environment_allowlist = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TMPDIR",
+  "RUSTUP_HOME",
+  "CARGO_HOME",
+]
+
+[security]
+# Detection is defense in depth, not a sandbox or guaranteed prevention.
+forbidden_commands = [
+  "git push",
+  "cargo publish",
+]
+
+# Repository-relative paths monitored for changes. Parent traversal, absolute
+# paths, and non-portable path syntax are rejected when configuration is read.
+forbidden_paths = [
+  ".git",
+  ".env",
+]

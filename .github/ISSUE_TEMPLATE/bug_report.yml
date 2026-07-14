@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible PatchArena defect
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose vulnerabilities or secrets here. Follow SECURITY.md for private reporting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide sanitized commands, task YAML, and repository setup.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, PatchArena revision, Git, Rust, and Codex CLI versions as relevant.
+      placeholder: |
+        OS: Ubuntu 24.04 / WSL2
+        PatchArena revision:
+        git --version:
+        rustc --version:
+        codex --version:
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Add the smallest useful error output. Remove credentials, private paths, and source.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: This report contains no secrets or private repository data.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build release binaries
+        run: cargo build --locked --workspace --release
+
+  msrv:
+    name: Linux / Rust 1.85.0 (MSRV)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install MSRV
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check workspace at MSRV
+        run: cargo check --locked --workspace --all-targets --all-features
+
+  # Linux is the required platform and matches the primary Linux/WSL2 target.
+  # A Windows job can be added once worktree lifecycle tests have explicit,
+  # reliable Windows coverage; CI must not silently skip those safety tests.

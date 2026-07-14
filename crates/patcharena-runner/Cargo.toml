@@ -1,0 +1,31 @@
+[package]
+name = "patcharena-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Agent process orchestration and evidence collection for PatchArena"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+patcharena-core = { path = "../patcharena-core" }
+patcharena-git = { path = "../patcharena-git" }
+serde_json.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
+[lints]
+workspace = true

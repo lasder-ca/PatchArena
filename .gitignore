@@ -1,0 +1,19 @@
+/target/
+/work/
+/fixtures/broken-rust-project/target/
+/.patcharena/runs/
+/.patcharena/groups/
+/.patcharena/reports/
+/.patcharena/comparisons/
+*.tmp
+
+# Local secrets and editor/OS state
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
