@@ -14,8 +14,8 @@ artifacts, and serialized data receive additional scrutiny.
 
 ## Development setup
 
-PatchArena targets Linux and WSL2 and requires Git plus Rust 1.85.0 or newer. Codex CLI is not
-required for builds or tests.
+PatchArena targets Linux and WSL2 and requires Git plus Rust 1.85.0 or newer. Coding-agent CLIs
+are not required for builds or tests; adapter contracts must remain testable without credentials.
 
 ```bash
 ./prepare.sh

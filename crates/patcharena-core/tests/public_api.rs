@@ -23,10 +23,13 @@ fn example_task(id: &str) -> TaskDefinition {
 fn example_result(run_id: String, group_id: String) -> RunResult {
     RunResult {
         schema_version: 1,
+        patcharena_version: None,
         run_id,
         group_id: Some(group_id),
         task_id: TaskId::new("example").expect("task ID"),
         agent: "codex".to_owned(),
+        agent_metadata: None,
+        execution_metadata: None,
         instructions_enabled: false,
         benchmark_identity: None,
         started_at: Utc.with_ymd_and_hms(2026, 7, 13, 1, 2, 3).unwrap(),

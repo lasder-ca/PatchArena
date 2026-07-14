@@ -11,6 +11,7 @@ state_dir = ".patcharena"
 tasks_dir = ".patcharena/tasks"
 runs_dir = ".patcharena/runs"
 groups_dir = ".patcharena/groups"
+battles_dir = ".patcharena/battles"
 
 [defaults]
 # Project numeric values are execution-time safety ceilings and are copied into
@@ -54,3 +55,10 @@ forbidden_paths = [
   ".git",
   ".env",
 ]
+
+# Custom agents are direct argv invocations. Never place API keys or tokens here.
+# [agents.my-agent]
+# type = "custom"
+# command = "./bin/my-agent"
+# args = ["--prompt-file", "{prompt_file}", "--workspace", "{workspace}"]
+# timeout_seconds = 600

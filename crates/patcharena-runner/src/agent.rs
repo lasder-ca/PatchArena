@@ -1,5 +1,8 @@
 use std::{
+    ffi::OsString,
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -21,6 +24,109 @@ pub struct AgentContext {
     pub max_output_bytes: usize,
     /// Parent environment variable names copied to the child.
     pub env_allowlist: Vec<String>,
+    /// Stable task ID used by custom templates.
+    pub task_id: String,
+    /// Stable run UUID used by custom templates.
+    pub run_id: String,
+    /// Private directory containing this run's evidence.
+    pub result_dir: PathBuf,
+}
+
+/// Static and detected identity for one registered agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDescriptor {
+    /// Stable registry ID.
+    pub id: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Executable name or configured path.
+    pub executable: PathBuf,
+    /// Detected version text.
+    pub cli_version: Option<String>,
+    /// Adapter implementation version.
+    pub adapter_version: String,
+    /// SHA-256 of non-secret adapter configuration.
+    pub config_hash: String,
+}
+
+/// Direct, shell-free process invocation built by an adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInvocation {
+    /// Executable to launch.
+    pub program: OsString,
+    /// Exact argv values.
+    pub args: Vec<OsString>,
+    /// Optional stdin bytes.
+    pub stdin: Option<Vec<u8>>,
+    /// Redacted command suitable for durable evidence.
+    pub audit_command: String,
+    /// Optional prompt file created with private permissions for this invocation.
+    pub prompt_file: Option<PathBuf>,
+}
+
+/// Adapter contract that isolates CLI-specific detection and invocation construction.
+pub trait AgentAdapter: Send + Sync {
+    /// Static/detected identity.
+    fn descriptor(&self) -> &AgentDescriptor;
+    /// Construct a direct process invocation.
+    fn build_invocation(&self, context: &AgentContext) -> Result<AgentInvocation, RunnerError>;
+    /// Optional adapter-specific timeout ceiling.
+    fn timeout_seconds(&self) -> Option<u64> {
+        None
+    }
+    /// Normalize or parse captured CLI output. Default adapters retain raw evidence unchanged.
+    fn parse_output(&self, execution: AgentExecution) -> Result<AgentExecution, RunnerError> {
+        Ok(execution)
+    }
+}
+
+/// Detect an executable version without invoking a shell.
+pub fn detect_version(executable: &Path, version_args: &[&str]) -> Result<String, String> {
+    let output = Command::new(executable)
+        .args(version_args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!("exited with {:?}", output.status.code()));
+    }
+    let bytes = if output.stdout.is_empty() {
+        &output.stderr
+    } else {
+        &output.stdout
+    };
+    let value = String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    (!value.is_empty())
+        .then_some(value)
+        .ok_or_else(|| "version command returned no text".to_owned())
+}
+
+/// Process-backed runner shared by all built-in and custom adapters.
+#[derive(Clone)]
+pub struct AdapterRunner {
+    adapter: Arc<dyn AgentAdapter>,
+}
+
+impl std::fmt::Debug for AdapterRunner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdapterRunner")
+            .field("agent", &self.adapter.descriptor().id)
+            .finish()
+    }
+}
+
+impl AdapterRunner {
+    /// Wrap an adapter as an executable runner.
+    #[must_use]
+    pub fn new(adapter: Arc<dyn AgentAdapter>) -> Self {
+        Self { adapter }
+    }
 }
 
 /// Observable result of one agent invocation.
@@ -58,6 +164,18 @@ pub trait AgentRunner: Send + Sync {
     /// Stable agent name stored in benchmark results.
     fn name(&self) -> &str;
 
+    /// Agent identity and detected version used in result metadata.
+    fn descriptor(&self) -> AgentDescriptor {
+        AgentDescriptor {
+            id: self.name().to_owned(),
+            display_name: self.name().to_owned(),
+            executable: PathBuf::from(self.name()),
+            cli_version: None,
+            adapter_version: env!("CARGO_PKG_VERSION").to_owned(),
+            config_hash: "0".repeat(64),
+        }
+    }
+
     /// Render the fixed invocation shape for the command audit without including the prompt.
     fn audit_command(&self, _context: &AgentContext) -> String {
         format!("{} agent", self.name())
@@ -67,76 +185,52 @@ pub trait AgentRunner: Send + Sync {
     async fn run(&self, context: &AgentContext) -> Result<AgentExecution, RunnerError>;
 }
 
-/// Non-interactive Codex CLI runner.
-#[derive(Debug, Clone)]
-pub struct CodexRunner {
-    executable: PathBuf,
-}
-
-impl Default for CodexRunner {
-    fn default() -> Self {
-        Self::new("codex")
-    }
-}
-
-impl CodexRunner {
-    /// Construct a runner using `executable` from the configured `PATH` or path.
-    pub fn new(executable: impl Into<PathBuf>) -> Self {
-        Self {
-            executable: executable.into(),
-        }
-    }
-}
-
 #[async_trait]
-impl AgentRunner for CodexRunner {
+impl AgentRunner for AdapterRunner {
     fn name(&self) -> &str {
-        "codex"
+        &self.adapter.descriptor().id
     }
-
+    fn descriptor(&self) -> AgentDescriptor {
+        self.adapter.descriptor().clone()
+    }
     fn audit_command(&self, context: &AgentContext) -> String {
-        shell_words::join([
-            self.executable.to_string_lossy().into_owned(),
-            "--ask-for-approval".to_owned(),
-            "never".to_owned(),
-            "exec".to_owned(),
-            "--ephemeral".to_owned(),
-            "--color".to_owned(),
-            "never".to_owned(),
-            "--json".to_owned(),
-            "--sandbox".to_owned(),
-            "workspace-write".to_owned(),
-            "--cd".to_owned(),
-            context.working_dir.to_string_lossy().into_owned(),
-            "-".to_owned(),
-        ])
+        self.adapter.build_invocation(context).map_or_else(
+            |_| format!("{} <invalid invocation>", self.name()),
+            |value| value.audit_command,
+        )
     }
-
     async fn run(&self, context: &AgentContext) -> Result<AgentExecution, RunnerError> {
-        let request = ProcessRequest {
-            program: self.executable.clone().into_os_string(),
-            args: vec![
-                "--ask-for-approval".into(),
-                "never".into(),
-                "exec".into(),
-                "--ephemeral".into(),
-                "--color".into(),
-                "never".into(),
-                "--json".into(),
-                "--sandbox".into(),
-                "workspace-write".into(),
-                "--cd".into(),
-                context.working_dir.clone().into_os_string(),
-                "-".into(),
-            ],
+        let invocation = self.adapter.build_invocation(context)?;
+        if let Some(path) = &invocation.prompt_file {
+            fs::write(path, context.prompt.as_bytes())
+                .await
+                .map_err(|source| RunnerError::Io {
+                    operation: "write private prompt file",
+                    path: path.clone(),
+                    source,
+                })?;
+        }
+        let timeout = self
+            .adapter
+            .timeout_seconds()
+            .map_or(context.timeout, |seconds| {
+                context.timeout.min(Duration::from_secs(seconds))
+            });
+        let result = execute_process(ProcessRequest {
+            program: invocation.program,
+            args: invocation.args,
             current_dir: context.working_dir.clone(),
-            stdin: Some(context.prompt.as_bytes().to_vec()),
-            timeout: context.timeout,
+            stdin: invocation.stdin,
+            timeout,
             max_output_bytes: context.max_output_bytes,
             env_allowlist: context.env_allowlist.clone(),
-        };
-        let result = execute_process(request).await?;
-        Ok(AgentExecution {
+        })
+        .await;
+        if let Some(path) = invocation.prompt_file {
+            let _ = fs::remove_file(path).await;
+        }
+        let result = result?;
+        self.adapter.parse_output(AgentExecution {
             exit_code: result.exit_code,
             timed_out: result.timed_out,
             duration: result.duration,
@@ -280,13 +374,34 @@ mod tests {
 
     use super::{AgentContext, AgentRunner, FakeAgentRunner, FakeBehavior};
 
+    #[cfg(unix)]
+    #[test]
+    fn detects_version_from_a_test_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().expect("temp dir");
+        let executable = directory.path().join("agent");
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'agent 1.2.3\\n'\n").expect("write");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("chmod");
+        assert_eq!(
+            super::detect_version(&executable, &["--version"]).expect("version"),
+            "agent 1.2.3"
+        );
+    }
+
     fn context(path: PathBuf) -> AgentContext {
         AgentContext {
-            working_dir: path,
+            working_dir: path.clone(),
             prompt: "make a change".to_owned(),
             timeout: Duration::from_secs(1),
             max_output_bytes: 8,
             env_allowlist: vec!["PATH".to_owned()],
+            task_id: "example".to_owned(),
+            run_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            result_dir: path,
         }
     }
 

@@ -3,18 +3,23 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod agents;
 mod audit;
 mod instructions;
 mod orchestration;
 mod process;
+mod registry;
 
 pub use agent::{
-    AgentContext, AgentExecution, AgentRunner, CodexRunner, FakeAgentRunner, FakeBehavior,
+    AdapterRunner, AgentAdapter, AgentContext, AgentDescriptor, AgentExecution, AgentInvocation,
+    AgentRunner, FakeAgentRunner, FakeBehavior, detect_version,
 };
+pub use agents::{ClaudeAdapter, CodexAdapter, CodexRunner, CustomAdapter, GeminiAdapter};
 pub use audit::{command_contains_forbidden, extract_codex_commands, path_is_forbidden};
 pub use instructions::InstructionMask;
 pub use orchestration::{ArenaRunner, GroupExecution, MAX_REPEAT, RunnerSettings};
 pub use process::{ProcessOutput, ProcessRequest, execute_process, parse_command};
+pub use registry::AgentRegistry;
 
 /// Errors produced while running an agent or benchmark command.
 #[derive(Debug, thiserror::Error)]

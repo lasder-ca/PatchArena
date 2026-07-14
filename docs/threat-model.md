@@ -27,7 +27,7 @@ Treat all of the following as attacker-controlled:
 - existing `.patcharena` contents and imported run records;
 - output consumed by Markdown or HTML report generation.
 
-Git, any shell explicitly selected by a task, Codex CLI, compilers, package managers, test programs, and dependencies are privileged external components from PatchArena's perspective.
+Git, any shell explicitly selected by a task, coding-agent CLIs or custom executables, compilers, package managers, test programs, and dependencies are privileged external components from PatchArena's perspective.
 
 ## Trust boundaries and controls
 
@@ -43,7 +43,7 @@ Cleanup is limited to a worktree that PatchArena created and recorded. It must n
 
 ### Commands, arguments, and shell execution
 
-PatchArena-owned Git and Codex invocations use a program plus an argument array rather than interpolated shell text. Task `setup` and `verify` strings are parsed into a program and arguments without invoking a shell. POSIX-style quoting is supported, but substitution, redirection, pipelines, and shell operators are not evaluated. This reduces command-injection exposure, but a task can still name any executable and pass dangerous arguments to it. Only run task definitions you trust, or run them inside an external sandbox.
+PatchArena-owned Git and agent invocations use a program plus an argument array rather than interpolated shell text. Custom-agent placeholders expand inside individual argv values, and unknown placeholders or parent traversal are rejected. Task `setup` and `verify` strings are parsed into a program and arguments without invoking a shell. POSIX-style quoting is supported, but substitution, redirection, pipelines, and shell operators are not evaluated. This reduces command-injection exposure, but a task or custom adapter can still name an executable and pass dangerous arguments to it. Only run configurations and task definitions you trust, or run them inside an external sandbox.
 
 Invoking an explicit shell (for example, configuring `sh -c` as the executable) restores shell parsing and its command-substitution, expansion, redirection, and pipeline risks. A future built-in shell mode would widen the trust boundary and must remain opt-in, conspicuous, and independently reviewed.
 

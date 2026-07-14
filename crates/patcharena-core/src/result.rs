@@ -16,6 +16,38 @@ pub const CURRENT_RESULT_SCHEMA_VERSION: u32 = 1;
 
 const MAX_RESULT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_GROUP_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BATTLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Agent identity and redacted invocation details recorded by schema-aware producers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMetadata {
+    /// Stable registry ID.
+    pub id: String,
+    /// Human-readable agent name.
+    pub display_name: String,
+    /// Detected CLI version, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// Adapter implementation version.
+    pub adapter_version: String,
+    /// Redacted command audit string. Prompts and credentials must never appear here.
+    pub command: String,
+}
+
+/// Reproducibility context added to v0.2.0 run results.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionMetadata {
+    /// Host operating-system identifier.
+    pub os: String,
+    /// Host CPU architecture identifier.
+    pub arch: String,
+    /// One-based repeat index within a run group.
+    pub repeat_index: u32,
+    /// SHA-256 of the selected agent configuration.
+    pub agent_config_hash: String,
+}
 
 /// Immutable inputs used to decide whether benchmark groups are comparable.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -367,6 +399,9 @@ impl ArtifactPaths {
 pub struct RunResult {
     /// Required on-disk schema version.
     pub schema_version: u32,
+    /// PatchArena application version that created this result. Absent in v0.1.x evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patcharena_version: Option<String>,
     /// UUID identifying this attempt.
     pub run_id: String,
     /// Optional UUID of the repeat-run group containing this attempt.
@@ -376,6 +411,12 @@ pub struct RunResult {
     pub task_id: TaskId,
     /// Stable agent backend name, initially `codex`.
     pub agent: String,
+    /// Additive structured agent identity retained alongside the legacy string field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_metadata: Option<AgentMetadata>,
+    /// Additive host and repeat metadata retained without changing schema version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_metadata: Option<ExecutionMetadata>,
     /// Whether repository instructions such as `AGENTS.md` were available to the agent.
     #[serde(default = "default_instructions_enabled")]
     pub instructions_enabled: bool,
@@ -482,6 +523,62 @@ impl RunResult {
             validate_uuid("group_id", group_id)?;
         }
         validate_agent(&self.agent)?;
+        if self
+            .patcharena_version
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ValidationError::new(
+                "patcharena_version",
+                "must not be blank when present",
+            )
+            .into());
+        }
+        if let Some(metadata) = &self.agent_metadata {
+            validate_agent(&metadata.id)?;
+            if metadata.id != self.agent {
+                return Err(ValidationError::new(
+                    "agent_metadata.id",
+                    "must match the legacy agent field",
+                )
+                .into());
+            }
+            for (field, value) in [
+                ("agent_metadata.display_name", &metadata.display_name),
+                ("agent_metadata.adapter_version", &metadata.adapter_version),
+                ("agent_metadata.command", &metadata.command),
+            ] {
+                if value.trim().is_empty() || value.contains('\0') {
+                    return Err(
+                        ValidationError::new(field, "must not be blank or contain NUL").into(),
+                    );
+                }
+            }
+        }
+        if let Some(metadata) = &self.execution_metadata {
+            if metadata.os.trim().is_empty()
+                || metadata.arch.trim().is_empty()
+                || metadata.repeat_index == 0
+            {
+                return Err(ValidationError::new(
+                    "execution_metadata",
+                    "requires non-empty OS/arch and a positive repeat index",
+                )
+                .into());
+            }
+            if metadata.agent_config_hash.len() != 64
+                || !metadata
+                    .agent_config_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(ValidationError::new(
+                    "execution_metadata.agent_config_hash",
+                    "must be a 64-character SHA-256 digest",
+                )
+                .into());
+            }
+        }
         if let Some(identity) = &self.benchmark_identity {
             identity.validate("benchmark_identity")?;
         }
@@ -549,6 +646,119 @@ impl RunResult {
             .into());
         }
         Ok(())
+    }
+}
+
+/// Per-agent entry in a sequential battle summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BattleAgentResult {
+    /// Stable agent ID.
+    pub agent_id: String,
+    /// Run-group UUID when startup reached persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Ordered run UUIDs produced for this agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_ids: Vec<String>,
+    /// Error summary when this agent could not complete its group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Versioned summary linking normal run results from a sequential multi-agent battle.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BattleResult {
+    /// Battle document schema version, independent of the application version.
+    pub schema_version: u32,
+    /// PatchArena application version that created this document.
+    pub patcharena_version: String,
+    /// Battle UUID.
+    pub battle_id: String,
+    /// Shared task ID.
+    pub task_id: TaskId,
+    /// Shared pinned Git commit.
+    pub base_commit: String,
+    /// Requested repeats per agent.
+    pub repeat: u32,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Agent entries in invocation order.
+    pub agents: Vec<BattleAgentResult>,
+}
+
+impl BattleResult {
+    /// Validate battle identity, shared base, and linked run identifiers.
+    pub fn validate(&self) -> Result<()> {
+        validate_schema("battle result", self.schema_version)?;
+        validate_uuid("battle_id", &self.battle_id)?;
+        if self.patcharena_version.trim().is_empty() || self.repeat == 0 {
+            return Err(ValidationError::new(
+                "battle",
+                "requires a version and positive repeat count",
+            )
+            .into());
+        }
+        BenchmarkIdentity {
+            repository_commit: self.base_commit.clone(),
+            task_fingerprint: "0".repeat(64),
+        }
+        .validate("battle")?;
+        if self.agents.is_empty() {
+            return Err(ValidationError::new("agents", "must not be empty").into());
+        }
+        let mut ids = HashSet::new();
+        for entry in &self.agents {
+            validate_agent(&entry.agent_id)?;
+            if !ids.insert(&entry.agent_id) {
+                return Err(ValidationError::new("agents", "agent IDs must be unique").into());
+            }
+            if let Some(group_id) = &entry.group_id {
+                validate_uuid("agents.group_id", group_id)?;
+            }
+            for run_id in &entry.run_ids {
+                validate_uuid("agents.run_ids", run_id)?;
+            }
+            if entry
+                .error
+                .as_ref()
+                .is_some_and(|error| error.trim().is_empty())
+            {
+                return Err(
+                    ValidationError::new("agents.error", "must not be blank when present").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Read and validate a battle JSON document.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let json = read_utf8_limited(path, MAX_BATTLE_FILE_BYTES)?;
+        let value: Self = serde_json::from_str(&json).map_err(|source| CoreError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        value.validate()?;
+        Ok(value)
+    }
+
+    /// Serialize a battle document as stable pretty JSON.
+    pub fn to_json_pretty(&self) -> Result<String> {
+        self.validate()?;
+        let json = serde_json::to_string_pretty(self).map_err(|source| CoreError::Json {
+            path: serialization_path("battle result JSON"),
+            source,
+        })?;
+        String::from_utf8(with_trailing_newline(json))
+            .map_err(|error| ValidationError::new("battle", error.to_string()).into())
+    }
+
+    /// Persist a new immutable battle document.
+    pub fn save_new(&self, path: impl AsRef<Path>) -> Result<()> {
+        atomic_write_new(path, self.to_json_pretty()?.as_bytes())
     }
 }
 
@@ -1060,10 +1270,13 @@ mod tests {
         let exit_code = if success { 0 } else { 1 };
         RunResult {
             schema_version: 1,
+            patcharena_version: None,
             run_id: run_id.to_owned(),
             group_id: Some(group_id.to_owned()),
             task_id: TaskId::new("example").expect("task ID"),
             agent: "codex".to_owned(),
+            agent_metadata: None,
+            execution_metadata: None,
             instructions_enabled: true,
             benchmark_identity: None,
             started_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
@@ -1107,6 +1320,30 @@ mod tests {
           "artifacts":{"stdout":"stdout.log","stderr":"stderr.log","patch":"changes.diff"}
         }"#;
         assert!(RunResult::from_json(json).is_err());
+    }
+
+    #[test]
+    fn battle_json_round_trips_without_scoring_fields() {
+        let battle = BattleResult {
+            schema_version: 1,
+            patcharena_version: "0.2.0".to_owned(),
+            battle_id: "d3b07384-d9a8-4c18-8f63-4f627c301097".to_owned(),
+            task_id: TaskId::new("example").expect("task"),
+            base_commit: "a".repeat(40),
+            repeat: 1,
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            agents: vec![BattleAgentResult {
+                agent_id: "codex".into(),
+                group_id: None,
+                run_ids: Vec::new(),
+                error: Some("unavailable".into()),
+            }],
+        };
+        let json = battle.to_json_pretty().expect("json");
+        assert!(!json.contains("winner"));
+        assert!(!json.contains("score"));
+        let decoded: BattleResult = serde_json::from_str(&json).expect("decode");
+        assert_eq!(decoded, battle);
     }
 
     #[test]

@@ -8,9 +8,9 @@ PatchArena is a reproducible benchmark runner for AI coding agents on real repos
 
 It runs a versioned repair task in a fresh Git worktree, captures what happened, verifies the result, and stores machine-readable evidence. Repeating the same task makes it possible to compare success, duration, patch size, verification failures, policy violations, and run-to-run variance instead of judging an agent from a single transcript.
 
-**Project status:** source-only, pre-release software. There is no crates.io package or stable
-compatibility promise yet. The on-disk formats are versioned so incompatible data fails
-explicitly instead of being silently misread.
+**Current release:** v0.2.0, installed from source. There is no crates.io package yet. PatchArena
+follows Semantic Versioning for its CLI and Rust APIs; persisted document schemas are versioned
+independently and additive v0.2.0 fields remain readable alongside v0.1.x evidence.
 
 [Quick start](#quick-start) · [Task format](#task-definitions) · [Reports](#html-report-example) · [Security](#security) · [Contributing](CONTRIBUTING.md)
 
@@ -54,12 +54,15 @@ PatchArena is an early-stage OSS project. The initial command surface is:
 
 - `patcharena init` — create repository-local configuration and state without overwriting existing files;
 - `patcharena task add` and `patcharena task list` — create and inspect YAML tasks;
-- `patcharena doctor` — check Git, the repository, Codex CLI, Rust, worktrees, and local writability;
-- `patcharena run` — execute one task through Codex CLI, optionally repeatedly, and persist evidence;
+- `patcharena doctor` — check common project prerequisites;
+- `patcharena agent list` / `patcharena agent doctor <id>` — discover and diagnose adapters;
+- `patcharena run` — execute one task through a selected agent and persist evidence;
+- `patcharena battle` — run several agents sequentially from the same committed base;
 - `patcharena compare` — compare two persisted run groups;
 - `patcharena report` — render persisted results as Markdown, JSON, or self-contained HTML.
 
-Codex CLI is the only production agent integration in the MVP. Tests use deterministic fake agents and do not require Codex or an external service.
+Built-in adapters support Codex CLI, Claude Code, and Gemini CLI. Project-local custom adapters can
+invoke other executables without a shell. Only the selected CLI is required for a run.
 
 ## What it records
 
@@ -82,7 +85,7 @@ Aggregating repeats exposes success rate, median duration, and variance. Separat
 - Linux or WSL2 (the primary supported environments)
 - Git
 - Rust **1.85.0** or newer (the MSRV; Rust 2024 edition)
-- Codex CLI for production `run` commands only
+- Codex CLI, Claude Code, Gemini CLI, or a configured custom executable for production runs
 
 The project itself builds and its test suite runs without Codex CLI.
 
@@ -119,6 +122,8 @@ patcharena task add \
   --verify "cargo test csv_export"
 
 patcharena task list
+patcharena agent list
+patcharena agent doctor codex
 patcharena run --task csv-newline-regression --agent codex --repeat 3
 ```
 
@@ -139,14 +144,17 @@ PatchArena records this condition, but the option does not create a context-free
 | `patcharena init` | Create repository-local configuration and state directories. |
 | `patcharena task add` | Create a validated task from a prompt file and commands. |
 | `patcharena task list` | List available task IDs and limits. |
+| `patcharena agent list` | List built-in and custom agents, availability, and CLI versions. |
+| `patcharena agent doctor <id>` | Diagnose one adapter without exposing credentials. |
 | `patcharena run` | Execute one or more isolated repetitions. |
+| `patcharena battle` | Run multiple agents sequentially against one task and base commit. |
 | `patcharena compare` | Compare two compatible completed groups or individual runs. |
 | `patcharena report` | Render Markdown, JSON, or self-contained HTML. |
-| `patcharena doctor` | Check Git, Rust, Codex CLI, worktrees, and state writability. |
+| `patcharena doctor` | Check common Git, Rust, worktree, and state prerequisites. |
 
 Use `patcharena <command> --help` for the authoritative option list. Stable error-category exit
 codes are `3` for invalid input or local I/O, `4` for Git or prerequisite failures, `5` for runner
-failures, and `7` for report or comparison failures. Clap uses its own standard code for argument
+failures, `6` for completed benchmarks containing failures, and `7` for report or comparison failures. Clap uses its own standard code for argument
 parsing errors.
 
 ## Task definitions
@@ -251,6 +259,69 @@ patcharena report --format json --output patcharena-report.json
 patcharena report --format markdown --output patcharena-report.md
 ```
 
+## Supported Agents
+
+`codex`, `claude`, and `gemini` are built in. `patcharena agent list` reports command availability
+and detected versions without treating an optional missing CLI as a project failure. Built-in and
+custom adapters own their executable detection, argv construction, output handling, and metadata;
+PatchArena never builds agent invocations through a shell.
+
+## Custom Agent Configuration
+
+Add a project-local adapter to `patcharena.toml`:
+
+```toml
+[agents.my-agent]
+type = "custom"
+command = "./bin/my-agent"
+args = ["--prompt-file", "{prompt_file}", "--workspace", "{workspace}"]
+timeout_seconds = 600
+```
+
+Supported placeholders are `{prompt}`, `{prompt_file}`, `{workspace}`, `{task_id}`, `{run_id}`,
+and `{result_dir}`. Expansion produces one argv value per configured array item, so shell metacharacters
+remain data. Unknown placeholders, empty commands, NUL bytes, and parent traversal are rejected.
+Relative executable paths resolve inside each detached worktree. Do not put credentials in this
+file; secret-looking command values and inline prompts are redacted from the durable command audit,
+but stdout, stderr, patches, and other artifacts can still contain sensitive data.
+
+## Agent Doctor
+
+Run `patcharena agent doctor codex` (or `claude`, `gemini`, or a custom ID) to check command/version
+detection, the redacted invocation shape, validated configuration, and detached-worktree support.
+Authentication is intentionally best effort: PatchArena does not read or print credential files,
+tokens, or environment values. The selected CLI performs its authoritative auth check when invoked.
+
+## Battle
+
+```bash
+patcharena battle \
+  --task csv-newline-regression \
+  --agents codex,claude,gemini \
+  --repeat 1
+```
+
+A battle loads one task, validates the requested registry IDs, pins the committed base, and runs
+agents sequentially in independent detached worktrees. Setup and verification are identical for
+every entry. Normal `result.json` and group records remain the source evidence; a separate
+`.patcharena/battles/<battle-id>.json` links their IDs and records partial failures. One failed
+agent does not prevent later agents from running. Battle deliberately assigns no score or winner.
+
+## Fairness
+
+The same task, base commit, limits, setup, and verification improve comparability, but do not make
+different agents intrinsically equivalent. Control CLI/model versions, configuration, credentials,
+network access, caches, toolchains, and rate limits. Use repeat counts appropriate to the experiment,
+inspect failed attempts, and publish the raw methodology rather than claiming a universal ranking.
+
+## SemVer and Result Schema Compatibility
+
+PatchArena application releases follow SemVer: additive features use a minor release, compatible
+fixes a patch release, and incompatible CLI/API behavior a major release. `schema_version` is a
+separate on-disk contract and remains `1` in v0.2.0. New results retain the legacy string `agent`
+field and add `patcharena_version`, `agent_metadata`, and `execution_metadata`; old v0.1.x schema-1
+results continue to load. Battle summaries have their own schema and application-version fields.
+
 ## Security
 
 Detached worktrees improve repeatability and reduce accidental edits to the primary checkout, while timeouts, bounded output, environment allowlisting, path validation, and policy checks reduce common failure modes. Linked worktrees still share Git objects, refs, and repository configuration with the primary repository. PatchArena checks selected Git metadata and configured forbidden paths after execution, but these are bounded, post-hoc detectors. They are not a filesystem or Git security boundary.
@@ -261,9 +332,9 @@ For untrusted benchmarks, use an ephemeral VM or container with an unprivileged 
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and [docs/threat-model.md](docs/threat-model.md) for assumptions, residual risks, and deployment guidance.
 
-## Current limitations
+## Security Limitations
 
-- Only Codex CLI is supported as a production agent.
+- Claude Code and Gemini CLI adapters are argument-tested in CI; full authenticated runs are optional and require those CLIs locally.
 - Linux and WSL2 are the primary targets; native Windows worktree and process-tree behavior is not yet continuously tested.
 - Git worktrees and post-run checks are not a filesystem, process, or network sandbox.
 - Unix process-group cleanup covers timeouts and remaining members after normal direct-child exit on a best-effort basis; detached descendants can survive. Native Windows currently terminates only the direct child, including for background descendants.
@@ -279,7 +350,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and [docs/threat-mode
 
 - Add native Windows Job Object termination, strengthen handling of detached Unix descendants, and document container profiles.
 - Add native Windows CI after worktree lifecycle behavior is reliable there.
-- Add more production agent adapters behind the existing runner abstraction.
+- Expand optional authenticated adapter smoke coverage without requiring credentials in CI.
 - Improve controlled experiment metadata for instruction-on/off comparisons.
 - Add schema migration tooling and richer statistical summaries.
 - Add artifact retention and opt-in redaction workflows.

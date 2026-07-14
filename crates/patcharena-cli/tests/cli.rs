@@ -1,11 +1,11 @@
 //! End-to-end CLI tests for initialization and task persistence.
 
-use std::{fs, path::Path, process::Command as StdCommand};
+use std::{fs, io::Write, path::Path, process::Command as StdCommand};
 
 use chrono::Utc;
 use patcharena_core::{
-    ArtifactPaths, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome, RunGroup,
-    RunResult, TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
+    ArtifactPaths, BattleResult, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome,
+    RunGroup, RunResult, TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
 };
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -35,6 +35,35 @@ fn init(directory: &Path) {
         .stdout(predicate::str::contains("initialized PatchArena"));
 }
 
+fn commit_base(directory: &Path) {
+    fs::write(directory.join("README.md"), "fixture\n").expect("write base");
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "--all"])
+            .current_dir(directory)
+            .status()
+            .expect("git add")
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=PatchArena Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "base"
+            ])
+            .current_dir(directory)
+            .status()
+            .expect("git commit")
+            .success()
+    );
+}
+
 #[test]
 fn help_lists_the_mvp_commands() {
     binary()
@@ -43,10 +72,86 @@ fn help_lists_the_mvp_commands() {
         .success()
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("task"))
+        .stdout(predicate::str::contains("agent"))
         .stdout(predicate::str::contains("run"))
+        .stdout(predicate::str::contains("battle"))
         .stdout(predicate::str::contains("compare"))
         .stdout(predicate::str::contains("report"))
         .stdout(predicate::str::contains("doctor"));
+}
+
+#[cfg(unix)]
+#[test]
+fn battle_continues_after_a_fake_failure_and_keeps_one_base_commit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = repository();
+    let failing = directory.path().join("fake-fail");
+    fs::write(
+        &failing,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'fake-fail 1.0'; exit 0; fi\nexit 1\n",
+    )
+    .expect("fake failing agent");
+    let mut permissions = fs::metadata(&failing).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&failing, permissions).expect("chmod");
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested).expect("nested cwd");
+    commit_base(directory.path());
+    init(directory.path());
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(directory.path().join("patcharena.toml"))
+        .expect("config");
+    writeln!(config,"\n[agents.fake-fail]\ntype = \"custom\"\ncommand = \"./fake-fail\"\nargs = []\n\n[agents.fake-ok]\ntype = \"custom\"\ncommand = \"true\"\nargs = []").expect("agents");
+    let task = TaskDefinition::new(
+        TaskId::new("battle-task").expect("id"),
+        "Make no changes.",
+        [CoreTaskCommand::new("true", std::iter::empty::<&str>())],
+    )
+    .expect("task");
+    task.save_new(directory.path().join(".patcharena/tasks/battle-task.yaml"))
+        .expect("save task");
+    binary()
+        .current_dir(&nested)
+        .args([
+            "battle",
+            "--task",
+            "battle-task",
+            "--agents",
+            "fake-fail,fake-ok",
+            "--repeat",
+            "1",
+        ])
+        .assert()
+        .code(6)
+        .stdout(predicate::str::contains("fake-fail\tfailed"))
+        .stdout(predicate::str::contains("fake-ok\tcompleted"));
+    let battle_path = fs::read_dir(directory.path().join(".patcharena/battles"))
+        .expect("battles")
+        .next()
+        .expect("battle entry")
+        .expect("entry")
+        .path();
+    let battle = BattleResult::load(battle_path).expect("battle result");
+    assert_eq!(battle.agents.len(), 2);
+    assert!(battle.agents[0].error.is_some());
+    assert!(battle.agents[1].error.is_none());
+    assert_ne!(battle.agents[0].run_ids, battle.agents[1].run_ids);
+    for entry in &battle.agents {
+        let run = RunResult::load(
+            directory
+                .path()
+                .join(".patcharena/runs")
+                .join(&entry.run_ids[0])
+                .join("result.json"),
+        )
+        .expect("run");
+        assert_eq!(
+            run.benchmark_identity.expect("identity").repository_commit,
+            battle.base_commit
+        );
+    }
 }
 
 #[test]
@@ -141,10 +246,13 @@ fn store_group(directory: &Path, success: bool, fingerprint_digit: char) -> RunG
     let now = Utc::now();
     let result = RunResult {
         schema_version: CURRENT_RESULT_SCHEMA_VERSION,
+        patcharena_version: None,
         run_id: run_id.clone(),
         group_id: Some(group.group_id.clone()),
         task_id,
         agent: "fake".to_owned(),
+        agent_metadata: None,
+        execution_metadata: None,
         instructions_enabled: true,
         benchmark_identity: group.benchmark_identity.clone(),
         started_at: now,

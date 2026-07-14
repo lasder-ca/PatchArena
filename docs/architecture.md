@@ -8,7 +8,7 @@ PatchArena turns a versioned task definition, repository revision, and effective
 | --- | --- |
 | `patcharena-core` | Configuration, YAML task definitions, run/result schemas, validation, identifiers, and shared errors. |
 | `patcharena-git` | Repository discovery, temporary Git worktrees, cleanup, patch capture, changed-file enumeration, and diff statistics. |
-| `patcharena-runner` | Run orchestration, effective-policy resolution, bounded process execution, and the `AgentRunner` abstraction, including Codex and deterministic fake runners. |
+| `patcharena-runner` | Run orchestration, bounded process execution, the adapter registry, Codex/Claude/Gemini/custom adapters, and deterministic fake runners. |
 | `patcharena-report` | Run-group aggregation, comparison, and Markdown, JSON, and self-contained HTML output. |
 | `patcharena-cli` | `clap` command routing, tracing setup, user-facing diagnostics, and process exit status. |
 
@@ -100,7 +100,7 @@ This avoids a broad class of shell-injection bugs. If a future task mode deliber
 
 ## Agent abstraction
 
-`AgentRunner` makes the orchestration independent of Codex CLI. The production runner validates that Codex is present and invokes its non-interactive interface. The fake runner produces deterministic success, failure, timeout, file-change, forbidden-path, and high-output cases for tests. CI does not call an external AI service.
+`AgentRunner` keeps orchestration independent of a specific CLI. `AgentAdapter` implementations own detection, direct argv construction, output parsing, and metadata; the registry combines built-ins with validated project-local custom agents. The fake runner produces deterministic success, failure, timeout, file-change, forbidden-path, and high-output cases. CI verifies invocation contracts without calling an external AI service.
 
 For `--without-instructions`, orchestration runs setup first, scans at most 100,000 worktree directory entries without following symlinked directories, and temporarily hides every discovered regular `AGENTS.md`, including untracked or ignored files. A scan overflow or an `AGENTS.md` symlink is an error. The mask applies only to the agent phase; files are restored before verification, and instruction/context sources outside the worktree are unaffected.
 

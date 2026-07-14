@@ -9,8 +9,9 @@ use std::{
 
 use chrono::Utc;
 use patcharena_core::{
-    ArtifactPaths, AuditEvent, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome,
-    RunGroup, RunPhase, RunResult, TaskCommand, TaskDefinition, Violation, ViolationKind,
+    AgentMetadata, ArtifactPaths, AuditEvent, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION,
+    CommandOutcome, ExecutionMetadata, RunGroup, RunPhase, RunResult, TaskCommand, TaskDefinition,
+    Violation, ViolationKind,
 };
 use patcharena_git::Repository;
 use sha2::{Digest, Sha256};
@@ -140,6 +141,7 @@ impl ArenaRunner {
                     &group.group_id,
                     instructions_enabled,
                     &benchmark_identity,
+                    iteration,
                 )
                 .await
             {
@@ -171,6 +173,7 @@ impl ArenaRunner {
         group_id: &str,
         instructions_enabled: bool,
         benchmark_identity: &BenchmarkIdentity,
+        repeat_index: u32,
     ) -> Result<RunResult, RunnerError> {
         let run_id = Uuid::new_v4().to_string();
         let run_directory = self.runs_directory.join(&run_id);
@@ -301,6 +304,9 @@ impl ArenaRunner {
                 timeout,
                 max_output_bytes: output_limit,
                 env_allowlist: self.settings.environment_allowlist.clone(),
+                task_id: task.id.to_string(),
+                run_id: run_id.clone(),
+                result_dir: run_directory.clone(),
             };
             let agent_audit_command = self.agent.audit_command(&context);
             let mask = if instructions_enabled {
@@ -595,10 +601,30 @@ impl ArenaRunner {
             && errors.is_empty();
         let result = RunResult {
             schema_version: CURRENT_RESULT_SCHEMA_VERSION,
+            patcharena_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             run_id,
             group_id: Some(group_id.to_owned()),
             task_id: task.id.clone(),
             agent: self.agent.name().to_owned(),
+            agent_metadata: Some({
+                let descriptor = self.agent.descriptor();
+                AgentMetadata {
+                    id: descriptor.id,
+                    display_name: descriptor.display_name,
+                    cli_version: descriptor.cli_version,
+                    adapter_version: descriptor.adapter_version,
+                    command: agent_outcome.as_ref().map_or_else(
+                        || format!("{} <not run>", self.agent.name()),
+                        |outcome| outcome.command.clone(),
+                    ),
+                }
+            }),
+            execution_metadata: Some(ExecutionMetadata {
+                os: std::env::consts::OS.to_owned(),
+                arch: std::env::consts::ARCH.to_owned(),
+                repeat_index,
+                agent_config_hash: self.agent.descriptor().config_hash,
+            }),
             instructions_enabled,
             benchmark_identity: Some(benchmark_identity.clone()),
             started_at,

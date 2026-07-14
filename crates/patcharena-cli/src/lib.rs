@@ -7,7 +7,8 @@ mod commands;
 mod error;
 
 pub use args::{
-    Agent, Cli, Command, CompareArgs, ReportArgs, ReportFormat, RunArgs, TaskAddArgs, TaskCommand,
+    AgentCommand, BattleArgs, Cli, Command, CompareArgs, ReportArgs, ReportFormat, RunArgs,
+    TaskAddArgs, TaskCommand,
 };
 pub use error::CliError;
 

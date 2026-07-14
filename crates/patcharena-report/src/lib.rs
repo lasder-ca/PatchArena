@@ -662,10 +662,13 @@ mod tests {
         let now = Utc::now();
         RunResult {
             schema_version: 1,
+            patcharena_version: None,
             run_id,
             group_id,
             task_id: TaskId::new("report-test").expect("task ID"),
             agent: "codex".to_owned(),
+            agent_metadata: None,
+            execution_metadata: None,
             instructions_enabled: true,
             benchmark_identity: None,
             started_at: now,

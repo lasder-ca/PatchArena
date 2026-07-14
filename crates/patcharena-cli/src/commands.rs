@@ -4,20 +4,22 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    sync::Arc,
 };
 
+use chrono::Utc;
 use patcharena_core::{
-    CommandList, ProjectConfig, ResolvedProjectPaths, TaskCommand as CoreTaskCommand,
-    TaskDefinition, TaskId, ValidationError, load_tasks, task_file_path,
+    BattleAgentResult, BattleResult, CURRENT_RESULT_SCHEMA_VERSION, CommandList, ProjectConfig,
+    ResolvedProjectPaths, TaskCommand as CoreTaskCommand, TaskDefinition, TaskId, ValidationError,
+    load_tasks, task_file_path,
 };
 use patcharena_git::Repository;
 use patcharena_report::{BenchmarkReport, Comparison, load_report, load_selection};
-use patcharena_runner::{ArenaRunner, CodexRunner, RunnerSettings};
+use patcharena_runner::{AgentContext, AgentRegistry, ArenaRunner, RunnerSettings};
+use uuid::Uuid;
 
 use crate::{
-    Agent, CliError, Command, CompareArgs, ReportArgs, ReportFormat, RunArgs, TaskAddArgs,
-    TaskCommand,
+    AgentCommand, BattleArgs, CliError, Command, CompareArgs, ReportArgs, ReportFormat, RunArgs,
+    TaskAddArgs, TaskCommand,
 };
 
 const EXIT_SUCCESS: u8 = 0;
@@ -31,7 +33,9 @@ pub async fn run(command: Command) -> Result<u8, CliError> {
             TaskCommand::Add(arguments) => task_add(*arguments),
             TaskCommand::List => task_list(),
         },
+        Command::Agent { command } => agent_command(command),
         Command::Run(arguments) => run_benchmark(arguments).await,
+        Command::Battle(arguments) => battle(arguments).await,
         Command::Compare(arguments) => compare(arguments),
         Command::Report(arguments) => report(arguments),
         Command::Doctor => doctor(),
@@ -137,19 +141,19 @@ async fn run_benchmark(arguments: RunArgs) -> Result<u8, CliError> {
         ))
         .into());
     }
-    check_executable("codex", &["--version"])?;
-    let settings = RunnerSettings {
-        timeout_seconds: project.config.defaults.timeout_seconds,
-        max_output_bytes: project.config.defaults.max_output_bytes,
-        max_changed_files: project.config.defaults.max_changed_files,
-        max_diff_lines: project.config.defaults.max_diff_lines,
-        environment_allowlist: project.config.defaults.environment_allowlist.clone(),
-        forbidden_commands: project.config.security.forbidden_commands.clone(),
-        forbidden_paths: project.config.security.forbidden_paths.clone(),
-    };
-    let agent = match arguments.agent {
-        Agent::Codex => Arc::new(CodexRunner::default()),
-    };
+    let registry = AgentRegistry::from_project(&project.config, &project.paths.repository_root)?;
+    let descriptor = registry
+        .descriptor(&arguments.agent)
+        .ok_or_else(|| CliError::Prerequisite(format!("unknown agent `{}`", arguments.agent)))?;
+    if descriptor.cli_version.is_none() {
+        return Err(CliError::Prerequisite(format!(
+            "agent `{}` executable `{}` is unavailable or did not report a version",
+            arguments.agent,
+            descriptor.executable.display()
+        )));
+    }
+    let settings = runner_settings(&project.config);
+    let agent = registry.runner(&arguments.agent)?;
     let runner = ArenaRunner::new(
         project.repository,
         &project.paths.runs_dir,
@@ -180,6 +184,200 @@ async fn run_benchmark(arguments: RunArgs) -> Result<u8, CliError> {
         Ok(EXIT_SUCCESS)
     } else {
         Ok(EXIT_BENCHMARK_FAILED)
+    }
+}
+
+fn agent_command(command: AgentCommand) -> Result<u8, CliError> {
+    let project = load_project()?;
+    let registry = AgentRegistry::from_project(&project.config, &project.paths.repository_root)?;
+    match command {
+        AgentCommand::List => {
+            println!("ID\tNAME\tSTATUS\tVERSION");
+            for agent in registry.list() {
+                let (status, version) = agent
+                    .cli_version
+                    .as_ref()
+                    .map_or(("missing", "-"), |version| ("available", version.as_str()));
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    agent.id, agent.display_name, status, version
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        AgentCommand::Doctor { agent } => {
+            let descriptor = registry
+                .descriptor(&agent)
+                .ok_or_else(|| CliError::Prerequisite(format!("unknown agent `{agent}`")))?;
+            let mut healthy = true;
+            println!("agent: {} ({})", descriptor.id, descriptor.display_name);
+            healthy &= print_check(
+                "CLI presence/version",
+                descriptor.cli_version.clone().ok_or_else(|| {
+                    format!(
+                        "`{}` not found or version detection failed",
+                        descriptor.executable.display()
+                    )
+                }),
+            );
+            let worktree = check_worktree(&project.repository);
+            healthy &= print_check("Detached worktree", worktree);
+            let context = AgentContext {
+                working_dir: project.paths.repository_root.clone(),
+                prompt: "<doctor-prompt>".into(),
+                timeout: std::time::Duration::from_secs(1),
+                max_output_bytes: 1024,
+                env_allowlist: project.config.defaults.environment_allowlist.clone(),
+                task_id: "doctor".into(),
+                run_id: Uuid::nil().to_string(),
+                result_dir: project.paths.state_dir.clone(),
+            };
+            match registry
+                .runner(&agent)
+                .map(|runner| runner.audit_command(&context))
+            {
+                Ok(command) => println!("[ok]   Invocation args: {command}"),
+                Err(error) => {
+                    println!("[fail] Invocation args: {error}");
+                    healthy = false;
+                }
+            }
+            println!(
+                "[info] Configuration: validated; auth is checked by the agent CLI at execution time (credentials are never inspected)"
+            );
+            Ok(if healthy {
+                EXIT_SUCCESS
+            } else {
+                EXIT_PREREQUISITE
+            })
+        }
+    }
+}
+
+async fn battle(arguments: BattleArgs) -> Result<u8, CliError> {
+    let project = load_project()?;
+    if arguments.agents.is_empty() {
+        return Err(CliError::Prerequisite(
+            "battle requires at least one agent".into(),
+        ));
+    }
+    let mut unique = HashSet::new();
+    if arguments.agents.iter().any(|id| !unique.insert(id.clone())) {
+        return Err(CliError::Prerequisite(
+            "battle agent IDs must be unique".into(),
+        ));
+    }
+    let task_id = TaskId::new(arguments.task)?;
+    let task = TaskDefinition::load(task_file_path(&project.paths.tasks_dir, &task_id))?;
+    let registry = AgentRegistry::from_project(&project.config, &project.paths.repository_root)?;
+    for id in &arguments.agents {
+        let descriptor = registry
+            .descriptor(id)
+            .ok_or_else(|| CliError::Prerequisite(format!("unknown agent `{id}`")))?;
+        if descriptor.cli_version.is_none() {
+            return Err(CliError::Prerequisite(format!(
+                "agent `{id}` is unavailable"
+            )));
+        }
+    }
+    project.repository.ensure_tracked_clean()?;
+    let base_commit = project.repository.resolve_commit("HEAD")?;
+    let battle_id = Uuid::new_v4().to_string();
+    let mut entries = Vec::new();
+    println!("AGENT\tSTATUS\tRUNS\tGROUP");
+    for id in &arguments.agents {
+        let runner = ArenaRunner::new(
+            project.repository.clone(),
+            &project.paths.runs_dir,
+            &project.paths.groups_dir,
+            registry.runner(id)?,
+            runner_settings(&project.config),
+        )?;
+        match runner
+            .run_group(
+                &task,
+                arguments.repeat.get(),
+                !arguments.without_instructions,
+            )
+            .await
+        {
+            Ok(execution) => {
+                let same_base = execution
+                    .group
+                    .benchmark_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.repository_commit == base_commit);
+                let error = if !same_base {
+                    Some("base commit changed during battle".to_owned())
+                } else if execution.results.iter().any(|result| !result.success) {
+                    Some("one or more runs failed".to_owned())
+                } else {
+                    None
+                };
+                let run_ids = execution
+                    .results
+                    .iter()
+                    .map(|result| result.run_id.clone())
+                    .collect::<Vec<_>>();
+                println!(
+                    "{id}\t{}\t{}\t{}",
+                    if error.is_none() {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    run_ids.len(),
+                    execution.group.group_id
+                );
+                entries.push(BattleAgentResult {
+                    agent_id: id.clone(),
+                    group_id: Some(execution.group.group_id),
+                    run_ids,
+                    error,
+                });
+            }
+            Err(error) => {
+                println!("{id}\tfailed\t0\t-");
+                entries.push(BattleAgentResult {
+                    agent_id: id.clone(),
+                    group_id: None,
+                    run_ids: Vec::new(),
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+    }
+    let summary = BattleResult {
+        schema_version: CURRENT_RESULT_SCHEMA_VERSION,
+        patcharena_version: env!("CARGO_PKG_VERSION").into(),
+        battle_id: battle_id.clone(),
+        task_id,
+        base_commit,
+        repeat: arguments.repeat.get(),
+        created_at: Utc::now(),
+        agents: entries,
+    };
+    let path = project.paths.battles_dir.join(format!("{battle_id}.json"));
+    summary.save_new(&path)?;
+    println!("battle: {battle_id}\nJSON: {}", path.display());
+    Ok(
+        if summary.agents.iter().all(|entry| entry.error.is_none()) {
+            EXIT_SUCCESS
+        } else {
+            EXIT_BENCHMARK_FAILED
+        },
+    )
+}
+
+fn runner_settings(config: &ProjectConfig) -> RunnerSettings {
+    RunnerSettings {
+        timeout_seconds: config.defaults.timeout_seconds,
+        max_output_bytes: config.defaults.max_output_bytes,
+        max_changed_files: config.defaults.max_changed_files,
+        max_diff_lines: config.defaults.max_diff_lines,
+        environment_allowlist: config.defaults.environment_allowlist.clone(),
+        forbidden_commands: config.security.forbidden_commands.clone(),
+        forbidden_paths: config.security.forbidden_paths.clone(),
     }
 }
 
@@ -311,6 +509,7 @@ fn create_project_directories(paths: &ResolvedProjectPaths) -> Result<(), CliErr
         &paths.tasks_dir,
         &paths.runs_dir,
         &paths.groups_dir,
+        &paths.battles_dir,
     ] {
         create_contained_directory(&paths.repository_root, directory)?;
     }
@@ -406,12 +605,6 @@ fn write_generated_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn check_executable(program: &str, arguments: &[&str]) -> Result<(), CliError> {
-    executable_version(program, arguments)
-        .map(|_| ())
-        .map_err(|error| CliError::Prerequisite(format!("{program}: {error}")))
-}
-
 fn executable_version(program: &str, arguments: &[&str]) -> Result<String, String> {
     let output = ProcessCommand::new(program)
         .args(arguments)
@@ -465,6 +658,7 @@ fn check_state_writable(repository: &Repository) -> Result<String, String> {
         &paths.tasks_dir,
         &paths.runs_dir,
         &paths.groups_dir,
+        &paths.battles_dir,
     ] {
         validate_contained_directory(&paths.repository_root, directory)
             .map_err(|error| error.to_string())?;

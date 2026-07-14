@@ -26,8 +26,16 @@ pub enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Discover and diagnose coding-agent adapters.
+    Agent {
+        /// Agent registry operation.
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Execute an isolated benchmark group.
     Run(RunArgs),
+    /// Run several agents sequentially against the same task and base commit.
+    Battle(BattleArgs),
     /// Compare two run groups or individual runs.
     Compare(CompareArgs),
     /// Render benchmark results.
@@ -43,6 +51,18 @@ pub enum TaskCommand {
     Add(Box<TaskAddArgs>),
     /// List configured tasks.
     List,
+}
+
+/// Agent registry operations.
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// List built-in and configured agents with availability and versions.
+    List,
+    /// Diagnose one agent without printing credentials or prompts.
+    Doctor {
+        /// Stable agent ID.
+        agent: String,
+    },
 }
 
 /// Arguments for `task add`.
@@ -87,8 +107,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub task: String,
     /// Coding agent implementation.
-    #[arg(long, value_enum, default_value_t = Agent::Codex)]
-    pub agent: Agent,
+    #[arg(long, default_value = "codex")]
+    pub agent: String,
     /// Number of independent worktrees and invocations (maximum 1000).
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     pub repeat: NonZeroU32,
@@ -97,11 +117,21 @@ pub struct RunArgs {
     pub without_instructions: bool,
 }
 
-/// Supported production agents.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum Agent {
-    /// OpenAI Codex CLI in non-interactive mode.
-    Codex,
+/// Arguments for `battle`.
+#[derive(Debug, clap::Args)]
+pub struct BattleArgs {
+    /// Task ID to execute.
+    #[arg(long)]
+    pub task: String,
+    /// Comma-separated stable agent IDs.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub agents: Vec<String>,
+    /// Independent repetitions per agent.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    pub repeat: NonZeroU32,
+    /// Temporarily hide repository instructions.
+    #[arg(long)]
+    pub without_instructions: bool,
 }
 
 /// Arguments for `compare`.
@@ -147,7 +177,7 @@ pub enum ReportFormat {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Command, ReportFormat, TaskCommand};
+    use super::{AgentCommand, Cli, Command, ReportFormat, TaskCommand};
 
     #[test]
     fn parses_task_add_with_repeated_commands() {
@@ -192,6 +222,41 @@ mod tests {
         assert!(
             Cli::try_parse_from(["patcharena", "run", "--task", "example", "--repeat", "0",])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_custom_agent_and_battle_agent_list() {
+        let run = Cli::try_parse_from([
+            "patcharena",
+            "run",
+            "--task",
+            "example",
+            "--agent",
+            "my-agent",
+        ])
+        .expect("run");
+        let Command::Run(run) = run.command else {
+            panic!("run")
+        };
+        assert_eq!(run.agent, "my-agent");
+        let battle = Cli::try_parse_from([
+            "patcharena",
+            "battle",
+            "--task",
+            "example",
+            "--agents",
+            "codex,claude,gemini",
+        ])
+        .expect("battle");
+        let Command::Battle(battle) = battle.command else {
+            panic!("battle")
+        };
+        assert_eq!(battle.agents, ["codex", "claude", "gemini"]);
+        let doctor =
+            Cli::try_parse_from(["patcharena", "agent", "doctor", "codex"]).expect("doctor");
+        assert!(
+            matches!(doctor.command,Command::Agent{command:AgentCommand::Doctor{agent}} if agent=="codex")
         );
     }
 }

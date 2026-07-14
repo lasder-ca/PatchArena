@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,8 @@ pub struct ProjectPaths {
     pub runs_dir: PathBuf,
     /// Directory containing repeat-run group metadata.
     pub groups_dir: PathBuf,
+    /// Directory containing multi-agent battle summaries.
+    pub battles_dir: PathBuf,
 }
 
 impl Default for ProjectPaths {
@@ -71,6 +73,7 @@ impl Default for ProjectPaths {
             tasks_dir: PathBuf::from(".patcharena/tasks"),
             runs_dir: PathBuf::from(".patcharena/runs"),
             groups_dir: PathBuf::from(".patcharena/groups"),
+            battles_dir: PathBuf::from(".patcharena/battles"),
         }
     }
 }
@@ -82,6 +85,7 @@ impl ProjectPaths {
             ("paths.tasks_dir", &self.tasks_dir),
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
+            ("paths.battles_dir", &self.battles_dir),
         ] {
             ensure_safe_relative_path(path)
                 .map_err(|error| ValidationError::new(field, format!("{error}")))?;
@@ -92,6 +96,7 @@ impl ProjectPaths {
             ("paths.tasks_dir", &self.tasks_dir),
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
+            ("paths.battles_dir", &self.battles_dir),
         ] {
             if !paths.insert(path) {
                 return Err(
@@ -103,6 +108,7 @@ impl ProjectPaths {
             ("paths.tasks_dir", &self.tasks_dir),
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
+            ("paths.battles_dir", &self.battles_dir),
         ] {
             if !path.starts_with(&self.state_dir) {
                 return Err(
@@ -112,6 +118,102 @@ impl ProjectPaths {
         }
         Ok(())
     }
+}
+
+/// User-defined agent configuration. Custom agents are launched directly without a shell.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentConfig {
+    /// An arbitrary local executable with validated argument templates.
+    Custom {
+        /// Executable name or safe repository-relative executable path.
+        command: String,
+        /// Argument templates expanded immediately before execution.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Optional timeout ceiling specific to this agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+    },
+}
+
+impl AgentConfig {
+    fn validate(&self, field: &str) -> Result<()> {
+        let Self::Custom {
+            command,
+            args,
+            timeout_seconds,
+        } = self;
+        if command.trim().is_empty() || command.contains('\0') {
+            return Err(ValidationError::new(
+                format!("{field}.command"),
+                "must not be blank or contain NUL",
+            )
+            .into());
+        }
+        let path = Path::new(command);
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ValidationError::new(
+                format!("{field}.command"),
+                "must not contain parent traversal",
+            )
+            .into());
+        }
+        if timeout_seconds.is_some_and(|value| value == 0) {
+            return Err(ValidationError::new(
+                format!("{field}.timeout_seconds"),
+                "must be greater than zero",
+            )
+            .into());
+        }
+        for (index, argument) in args.iter().enumerate() {
+            if argument.contains('\0') {
+                return Err(ValidationError::new(
+                    format!("{field}.args[{index}]"),
+                    "must not contain NUL",
+                )
+                .into());
+            }
+            validate_placeholders(argument).map_err(|message| {
+                ValidationError::new(format!("{field}.args[{index}]"), message)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_placeholders(template: &str) -> std::result::Result<(), String> {
+    let allowed = [
+        "prompt",
+        "prompt_file",
+        "workspace",
+        "task_id",
+        "run_id",
+        "result_dir",
+    ];
+    let bytes = template.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'}' => return Err("contains an unmatched closing brace".to_owned()),
+            b'{' => {
+                let end = template[cursor + 1..]
+                    .find('}')
+                    .map(|offset| cursor + 1 + offset)
+                    .ok_or_else(|| "contains an unclosed placeholder".to_owned())?;
+                let name = &template[cursor + 1..end];
+                if name.contains('{') || !allowed.contains(&name) {
+                    return Err(format!("contains unknown placeholder `{{{name}}}`"));
+                }
+                cursor = end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    Ok(())
 }
 
 /// Project safety ceilings and environment policy used to seed and cap tasks.
@@ -253,6 +355,9 @@ pub struct ProjectConfig {
     /// Project-wide forbidden operations.
     #[serde(default)]
     pub security: SecurityDefaults,
+    /// Project-local custom agent definitions keyed by stable ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agents: BTreeMap<String, AgentConfig>,
 }
 
 impl Default for ProjectConfig {
@@ -262,6 +367,7 @@ impl Default for ProjectConfig {
             paths: ProjectPaths::default(),
             defaults: RunnerDefaults::default(),
             security: SecurityDefaults::default(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -319,6 +425,7 @@ impl ProjectConfig {
             tasks_dir: safe_join(&repository_root, &self.paths.tasks_dir)?,
             runs_dir: safe_join(&repository_root, &self.paths.runs_dir)?,
             groups_dir: safe_join(&repository_root, &self.paths.groups_dir)?,
+            battles_dir: safe_join(&repository_root, &self.paths.battles_dir)?,
             config_file: repository_root.join(CONFIG_FILE_NAME),
             repository_root,
         })
@@ -336,6 +443,27 @@ impl ProjectConfig {
         self.paths.validate()?;
         self.defaults.validate()?;
         self.security.validate()?;
+        for (id, agent) in &self.agents {
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(ValidationError::new(
+                    format!("agents.{id}"),
+                    "agent ID must use lowercase ASCII letters, digits, or hyphens",
+                )
+                .into());
+            }
+            if matches!(id.as_str(), "codex" | "claude" | "gemini") {
+                return Err(ValidationError::new(
+                    format!("agents.{id}"),
+                    "must not shadow a built-in agent",
+                )
+                .into());
+            }
+            agent.validate(&format!("agents.{id}"))?;
+        }
         Ok(())
     }
 }
@@ -355,6 +483,8 @@ pub struct ResolvedProjectPaths {
     pub runs_dir: PathBuf,
     /// Absolute run-group directory.
     pub groups_dir: PathBuf,
+    /// Absolute battle-summary directory.
+    pub battles_dir: PathBuf,
 }
 
 fn is_environment_name(name: &str) -> bool {
@@ -385,6 +515,25 @@ mod tests {
             let mut config = ProjectConfig::default();
             config.paths.tasks_dir = PathBuf::from(path);
             assert!(config.validate().is_err(), "accepted {path:?}");
+        }
+    }
+
+    #[test]
+    fn custom_agents_validate_placeholders_and_paths() {
+        let valid = r#"schema_version = 1
+[agents.local]
+type = "custom"
+command = "./bin/agent"
+args = ["--prompt-file", "{prompt_file}", "--workspace", "{workspace}"]
+timeout_seconds = 30
+"#;
+        assert!(ProjectConfig::from_toml(valid).is_ok());
+        for invalid in [
+            valid.replace("{workspace}", "{unknown}"),
+            valid.replace("./bin/agent", "../agent"),
+            valid.replace("./bin/agent", ""),
+        ] {
+            assert!(ProjectConfig::from_toml(&invalid).is_err());
         }
     }
 
