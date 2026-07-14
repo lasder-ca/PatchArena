@@ -27,7 +27,9 @@ pub use result::{
     RunPhase, RunResult, RunSummary, VerificationResult, Violation, ViolationKind,
 };
 pub use suite::{
-    CURRENT_SUITE_SCHEMA_VERSION, SuiteDefinition, SuiteId, load_suites, suite_file_path,
+    CURRENT_SUITE_SCHEMA_VERSION, SuiteCell, SuiteCellStatus, SuiteDefinition, SuiteExecution,
+    SuiteExecutionStatus, SuiteId, SuiteTaskSnapshot, load_suites, suite_checkpoint_path,
+    suite_file_path, suite_run_directory,
 };
 pub use task::{
     CommandList, ForbiddenRules, StructuredCommand, TaskCommand, TaskDefinition, TaskId,

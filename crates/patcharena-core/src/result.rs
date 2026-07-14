@@ -60,7 +60,7 @@ pub struct BenchmarkIdentity {
 }
 
 impl BenchmarkIdentity {
-    fn validate(&self, field: &str) -> Result<()> {
+    pub(crate) fn validate(&self, field: &str) -> Result<()> {
         if !matches!(self.repository_commit.len(), 40 | 64)
             || !self
                 .repository_commit
