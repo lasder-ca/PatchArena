@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/lasder-ca/PatchArena/actions/workflows/ci.yml/badge.svg)](https://github.com/lasder-ca/PatchArena/actions/workflows/ci.yml)
 
+**English** | [日本語](README.ja.md)
+
 PatchArena is a reproducible benchmark runner for AI coding agents on real repositories.
 
 It runs a versioned repair task in a fresh Git worktree, captures what happened, verifies the result, and stores machine-readable evidence. Repeating the same task makes it possible to compare success, duration, patch size, verification failures, policy violations, and run-to-run variance instead of judging an agent from a single transcript.

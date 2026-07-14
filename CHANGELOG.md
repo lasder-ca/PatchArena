@@ -18,5 +18,6 @@ version is tagged.
 - Compatible-group comparison and Markdown, JSON, and self-contained HTML reports.
 - Deterministic fake-agent, process, path, worktree, CLI, comparison, and report tests.
 - Linux CI, an explicit Rust 1.85 MSRV job, security documentation, and contributor guidance.
+- A complete Japanese README with language navigation from the English README.
 
 No release has been published yet.
