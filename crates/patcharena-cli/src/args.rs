@@ -32,6 +32,12 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Define, execute, resume, and report a multi-task benchmark suite.
+    Suite {
+        /// Suite operation.
+        #[command(subcommand)]
+        command: SuiteCommand,
+    },
     /// Execute an isolated benchmark group.
     Run(RunArgs),
     /// Run several agents sequentially against the same task and base commit.
@@ -63,6 +69,77 @@ pub enum AgentCommand {
         /// Stable agent ID.
         agent: String,
     },
+}
+
+/// Benchmark suite operations.
+#[derive(Debug, Subcommand)]
+pub enum SuiteCommand {
+    /// Create a reviewable suite definition.
+    Add(SuiteAddArgs),
+    /// List configured suite definitions.
+    List,
+    /// Preflight and execute a suite against explicit agents.
+    Run(SuiteRunArgs),
+    /// Resume the pending cells of a checkpointed suite run.
+    Resume(SuiteResumeArgs),
+    /// Re-render one suite run from persisted evidence.
+    Report(SuiteReportArgs),
+}
+
+/// Arguments for `suite add`.
+#[derive(Debug, clap::Args)]
+pub struct SuiteAddArgs {
+    /// Stable filesystem-safe suite identifier.
+    #[arg(long)]
+    pub id: String,
+    /// Optional human-readable suite purpose.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Task ID in suite order; repeat this option for multiple tasks.
+    #[arg(long, required = true, action = ArgAction::Append)]
+    pub task: Vec<String>,
+}
+
+/// Arguments for `suite run`.
+#[derive(Debug, clap::Args)]
+pub struct SuiteRunArgs {
+    /// Suite definition ID.
+    #[arg(long)]
+    pub suite: String,
+    /// Comma-separated stable agent IDs in execution order.
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub agents: Vec<String>,
+    /// Independent repetitions for every task-and-agent cell.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    pub repeat: NonZeroU32,
+    /// Temporarily hide regular repository instruction files.
+    #[arg(long)]
+    pub without_instructions: bool,
+    /// Validate and print the immutable plan without creating artifacts.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `suite resume`.
+#[derive(Debug, clap::Args)]
+pub struct SuiteResumeArgs {
+    /// Suite-run UUID to resume.
+    #[arg(long)]
+    pub run: String,
+}
+
+/// Arguments for `suite report`.
+#[derive(Debug, clap::Args)]
+pub struct SuiteReportArgs {
+    /// Suite-run UUID to load.
+    #[arg(long)]
+    pub run: String,
+    /// Report serialization format.
+    #[arg(long, value_enum)]
+    pub format: ReportFormat,
+    /// Write to a file instead of standard output.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 /// Arguments for `task add`.
@@ -177,7 +254,7 @@ pub enum ReportFormat {
 mod tests {
     use clap::Parser;
 
-    use super::{AgentCommand, Cli, Command, ReportFormat, TaskCommand};
+    use super::{AgentCommand, Cli, Command, ReportFormat, SuiteCommand, TaskCommand};
 
     #[test]
     fn parses_task_add_with_repeated_commands() {
@@ -257,6 +334,68 @@ mod tests {
             Cli::try_parse_from(["patcharena", "agent", "doctor", "codex"]).expect("doctor");
         assert!(
             matches!(doctor.command,Command::Agent{command:AgentCommand::Doctor{agent}} if agent=="codex")
+        );
+    }
+
+    #[test]
+    fn parses_suite_add_run_resume_and_report() {
+        let add = Cli::try_parse_from([
+            "patcharena",
+            "suite",
+            "add",
+            "--id",
+            "core",
+            "--task",
+            "one",
+            "--task",
+            "two",
+        ])
+        .expect("suite add");
+        assert!(matches!(
+            add.command,
+            Command::Suite {
+                command: SuiteCommand::Add(_)
+            }
+        ));
+
+        let run = Cli::try_parse_from([
+            "patcharena",
+            "suite",
+            "run",
+            "--suite",
+            "core",
+            "--agents",
+            "codex,claude",
+            "--repeat",
+            "3",
+            "--dry-run",
+        ])
+        .expect("suite run");
+        let Command::Suite {
+            command: SuiteCommand::Run(run),
+        } = run.command
+        else {
+            panic!("expected suite run");
+        };
+        assert_eq!(run.agents, ["codex", "claude"]);
+        assert_eq!(run.repeat.get(), 3);
+        assert!(run.dry_run);
+
+        let id = "00000000-0000-0000-0000-000000000000";
+        assert!(Cli::try_parse_from(["patcharena", "suite", "resume", "--run", id]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "patcharena",
+                "suite",
+                "report",
+                "--run",
+                id,
+                "--format",
+                "html",
+                "--output",
+                "report.html",
+            ])
+            .is_ok()
         );
     }
 }

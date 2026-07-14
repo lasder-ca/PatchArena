@@ -524,6 +524,7 @@ dependencies = [
  "patcharena-report",
  "patcharena-runner",
  "predicates",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

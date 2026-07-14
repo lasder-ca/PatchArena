@@ -22,9 +22,9 @@ use crate::{
     TaskAddArgs, TaskCommand,
 };
 
-const EXIT_SUCCESS: u8 = 0;
+pub(crate) const EXIT_SUCCESS: u8 = 0;
 const EXIT_PREREQUISITE: u8 = 4;
-const EXIT_BENCHMARK_FAILED: u8 = 6;
+pub(crate) const EXIT_BENCHMARK_FAILED: u8 = 6;
 
 pub async fn run(command: Command) -> Result<u8, CliError> {
     match command {
@@ -34,6 +34,7 @@ pub async fn run(command: Command) -> Result<u8, CliError> {
             TaskCommand::List => task_list(),
         },
         Command::Agent { command } => agent_command(command),
+        Command::Suite { command } => crate::suite::run(command).await,
         Command::Run(arguments) => run_benchmark(arguments).await,
         Command::Battle(arguments) => battle(arguments).await,
         Command::Compare(arguments) => compare(arguments),
@@ -369,7 +370,7 @@ async fn battle(arguments: BattleArgs) -> Result<u8, CliError> {
     )
 }
 
-fn runner_settings(config: &ProjectConfig) -> RunnerSettings {
+pub(crate) fn runner_settings(config: &ProjectConfig) -> RunnerSettings {
     RunnerSettings {
         timeout_seconds: config.defaults.timeout_seconds,
         max_output_bytes: config.defaults.max_output_bytes,
@@ -476,13 +477,13 @@ fn doctor() -> Result<u8, CliError> {
     })
 }
 
-struct Project {
-    repository: Repository,
-    config: ProjectConfig,
-    paths: ResolvedProjectPaths,
+pub(crate) struct Project {
+    pub(crate) repository: Repository,
+    pub(crate) config: ProjectConfig,
+    pub(crate) paths: ResolvedProjectPaths,
 }
 
-fn load_project() -> Result<Project, CliError> {
+pub(crate) fn load_project() -> Result<Project, CliError> {
     let repository = Repository::discover(current_directory()?)?;
     let config_path = repository.root().join(patcharena_core::CONFIG_FILE_NAME);
     let config = ProjectConfig::load(config_path)?;
@@ -503,20 +504,22 @@ fn current_directory() -> Result<PathBuf, CliError> {
     })
 }
 
-fn create_project_directories(paths: &ResolvedProjectPaths) -> Result<(), CliError> {
+pub(crate) fn create_project_directories(paths: &ResolvedProjectPaths) -> Result<(), CliError> {
     for directory in [
         &paths.state_dir,
         &paths.tasks_dir,
         &paths.runs_dir,
         &paths.groups_dir,
         &paths.battles_dir,
+        &paths.suites_dir,
+        &paths.suite_runs_dir,
     ] {
         create_contained_directory(&paths.repository_root, directory)?;
     }
     Ok(())
 }
 
-fn create_contained_directory(root: &Path, target: &Path) -> Result<(), CliError> {
+pub(crate) fn create_contained_directory(root: &Path, target: &Path) -> Result<(), CliError> {
     walk_contained_directory(root, target, true)
 }
 
@@ -590,7 +593,7 @@ where
     );
 }
 
-fn write_generated_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+pub(crate) fn write_generated_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -659,6 +662,8 @@ fn check_state_writable(repository: &Repository) -> Result<String, String> {
         &paths.runs_dir,
         &paths.groups_dir,
         &paths.battles_dir,
+        &paths.suites_dir,
+        &paths.suite_runs_dir,
     ] {
         validate_contained_directory(&paths.repository_root, directory)
             .map_err(|error| error.to_string())?;

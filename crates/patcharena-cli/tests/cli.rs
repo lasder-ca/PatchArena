@@ -5,7 +5,8 @@ use std::{fs, io::Write, path::Path, process::Command as StdCommand};
 use chrono::Utc;
 use patcharena_core::{
     ArtifactPaths, BattleResult, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome,
-    RunGroup, RunResult, TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
+    RunGroup, RunResult, SuiteCellStatus, SuiteExecution, SuiteExecutionStatus,
+    TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
 };
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -73,6 +74,7 @@ fn help_lists_the_mvp_commands() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("task"))
         .stdout(predicate::str::contains("agent"))
+        .stdout(predicate::str::contains("suite"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("battle"))
         .stdout(predicate::str::contains("compare"))
@@ -154,6 +156,232 @@ fn battle_continues_after_a_fake_failure_and_keeps_one_base_commit() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn suite_run_builds_a_two_task_two_agent_evidence_matrix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = repository();
+    init(directory.path());
+    for agent in ["fake-a", "fake-b"] {
+        let executable = directory.path().join(agent);
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then echo '{agent} 1.0'; exit 0; fi\nexit 0\n"
+            ),
+        )
+        .expect("fake agent");
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+    }
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(directory.path().join("patcharena.toml"))
+        .unwrap();
+    writeln!(
+        config,
+        "\n[agents.fake-a]\ntype = \"custom\"\ncommand = \"./fake-a\"\nargs = []\n\n[agents.fake-b]\ntype = \"custom\"\ncommand = \"./fake-b\"\nargs = []"
+    )
+    .unwrap();
+    drop(config);
+    for id in ["one", "two"] {
+        let task = TaskDefinition::new(
+            TaskId::new(id).unwrap(),
+            "Make no changes.",
+            [CoreTaskCommand::new("true", std::iter::empty::<&str>())],
+        )
+        .unwrap();
+        task.save_new(
+            directory
+                .path()
+                .join(".patcharena/tasks")
+                .join(format!("{id}.yaml")),
+        )
+        .unwrap();
+    }
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "add",
+            "--id",
+            "core",
+            "--description",
+            "Core regression suite",
+            "--task",
+            "one",
+            "--task",
+            "two",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added suite `core`"));
+    binary()
+        .current_dir(directory.path())
+        .args(["suite", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("core\t2\tCore regression suite"));
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite", "add", "--id", "core", "--task", "one", "--task", "two",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("refusing to overwrite"));
+    commit_base(directory.path());
+
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "run",
+            "--suite",
+            "core",
+            "--agents",
+            "fake-a,fake-a",
+            "--dry-run",
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("selected more than once"));
+
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "run",
+            "--suite",
+            "core",
+            "--agents",
+            "fake-a,fake-b",
+            "--repeat",
+            "1",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("invocations: 4"))
+        .stdout(predicate::str::contains(
+            "no run, group, or suite-run records",
+        ));
+    assert_eq!(
+        fs::read_dir(directory.path().join(".patcharena/suite-runs"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "run",
+            "--suite",
+            "core",
+            "--agents",
+            "fake-a,fake-b",
+            "--repeat",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("suite run:"))
+        .stdout(predicate::str::contains("HTML:"));
+
+    let suite_run_directories = fs::read_dir(directory.path().join(".patcharena/suite-runs"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(suite_run_directories.len(), 1);
+    let suite_run_directory = suite_run_directories[0].path();
+    let execution = SuiteExecution::load(suite_run_directory.join("suite.json")).unwrap();
+    assert_eq!(execution.cells.len(), 4);
+    assert!(execution.cells.iter().all(|cell| cell.group_id.is_some()));
+    assert_eq!(
+        fs::read_dir(directory.path().join(".patcharena/groups"))
+            .unwrap()
+            .count(),
+        4
+    );
+    assert_eq!(
+        fs::read_dir(directory.path().join(".patcharena/runs"))
+            .unwrap()
+            .count(),
+        4
+    );
+    let report_json = fs::read_to_string(suite_run_directory.join("report.json")).unwrap();
+    let report: patcharena_report::SuiteReport = serde_json::from_str(&report_json).unwrap();
+    assert_eq!(report.cells.len(), 4);
+    let html = fs::read_to_string(suite_run_directory.join("report.html")).unwrap();
+    assert_eq!(html.matches("class=\"cell ").count(), 4);
+    assert!(!html.contains("https://"));
+
+    let suite_run_id = execution.suite_run_id.clone();
+    let preserved_group_ids = execution.cells[..3]
+        .iter()
+        .map(|cell| cell.group_id.clone())
+        .collect::<Vec<_>>();
+    let mut interrupted = execution;
+    let last = interrupted.cells.last_mut().unwrap();
+    last.status = SuiteCellStatus::Pending;
+    last.group_id = None;
+    last.error = None;
+    interrupted.status = SuiteExecutionStatus::Running;
+    interrupted.completed_at = None;
+    interrupted.updated_at = Utc::now();
+    interrupted
+        .save_replace(suite_run_directory.join("suite.json"))
+        .unwrap();
+
+    binary()
+        .current_dir(directory.path())
+        .args(["suite", "resume", "--run", &suite_run_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "suite run: {suite_run_id}"
+        )));
+    let resumed = SuiteExecution::load(suite_run_directory.join("suite.json")).unwrap();
+    assert_eq!(
+        resumed.cells[..3]
+            .iter()
+            .map(|cell| cell.group_id.clone())
+            .collect::<Vec<_>>(),
+        preserved_group_ids
+    );
+    assert!(resumed.cells.last().unwrap().group_id.is_some());
+    assert_eq!(
+        fs::read_dir(directory.path().join(".patcharena/groups"))
+            .unwrap()
+            .count(),
+        5
+    );
+
+    let export = directory.path().join("suite-export.json");
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "report",
+            "--run",
+            &suite_run_id,
+            "--format",
+            "json",
+            "--output",
+        ])
+        .arg(&export)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wrote JSON suite report"));
+    let exported: patcharena_report::SuiteReport =
+        serde_json::from_str(&fs::read_to_string(export).unwrap()).unwrap();
+    assert_eq!(exported.cells.len(), 4);
+}
+
 #[test]
 fn init_is_idempotent_and_does_not_overwrite_config() {
     let directory = repository();
@@ -170,6 +398,8 @@ fn init_is_idempotent_and_does_not_overwrite_config() {
     assert!(directory.path().join(".patcharena/tasks").is_dir());
     assert!(directory.path().join(".patcharena/runs").is_dir());
     assert!(directory.path().join(".patcharena/groups").is_dir());
+    assert!(directory.path().join(".patcharena/suites").is_dir());
+    assert!(directory.path().join(".patcharena/suite-runs").is_dir());
 }
 
 #[test]

@@ -5,10 +5,12 @@
 mod args;
 mod commands;
 mod error;
+mod suite;
 
 pub use args::{
     AgentCommand, BattleArgs, Cli, Command, CompareArgs, ReportArgs, ReportFormat, RunArgs,
-    TaskAddArgs, TaskCommand,
+    SuiteAddArgs, SuiteCommand, SuiteReportArgs, SuiteResumeArgs, SuiteRunArgs, TaskAddArgs,
+    TaskCommand,
 };
 pub use error::CliError;
 
