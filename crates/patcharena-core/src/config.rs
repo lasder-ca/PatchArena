@@ -64,6 +64,10 @@ pub struct ProjectPaths {
     pub groups_dir: PathBuf,
     /// Directory containing multi-agent battle summaries.
     pub battles_dir: PathBuf,
+    /// Directory containing checked-in benchmark suite definitions.
+    pub suites_dir: PathBuf,
+    /// Directory containing generated suite execution checkpoints and reports.
+    pub suite_runs_dir: PathBuf,
 }
 
 impl Default for ProjectPaths {
@@ -74,6 +78,8 @@ impl Default for ProjectPaths {
             runs_dir: PathBuf::from(".patcharena/runs"),
             groups_dir: PathBuf::from(".patcharena/groups"),
             battles_dir: PathBuf::from(".patcharena/battles"),
+            suites_dir: PathBuf::from(".patcharena/suites"),
+            suite_runs_dir: PathBuf::from(".patcharena/suite-runs"),
         }
     }
 }
@@ -86,6 +92,8 @@ impl ProjectPaths {
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
             ("paths.battles_dir", &self.battles_dir),
+            ("paths.suites_dir", &self.suites_dir),
+            ("paths.suite_runs_dir", &self.suite_runs_dir),
         ] {
             ensure_safe_relative_path(path)
                 .map_err(|error| ValidationError::new(field, format!("{error}")))?;
@@ -97,6 +105,8 @@ impl ProjectPaths {
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
             ("paths.battles_dir", &self.battles_dir),
+            ("paths.suites_dir", &self.suites_dir),
+            ("paths.suite_runs_dir", &self.suite_runs_dir),
         ] {
             if !paths.insert(path) {
                 return Err(
@@ -109,6 +119,8 @@ impl ProjectPaths {
             ("paths.runs_dir", &self.runs_dir),
             ("paths.groups_dir", &self.groups_dir),
             ("paths.battles_dir", &self.battles_dir),
+            ("paths.suites_dir", &self.suites_dir),
+            ("paths.suite_runs_dir", &self.suite_runs_dir),
         ] {
             if !path.starts_with(&self.state_dir) {
                 return Err(
@@ -426,6 +438,8 @@ impl ProjectConfig {
             runs_dir: safe_join(&repository_root, &self.paths.runs_dir)?,
             groups_dir: safe_join(&repository_root, &self.paths.groups_dir)?,
             battles_dir: safe_join(&repository_root, &self.paths.battles_dir)?,
+            suites_dir: safe_join(&repository_root, &self.paths.suites_dir)?,
+            suite_runs_dir: safe_join(&repository_root, &self.paths.suite_runs_dir)?,
             config_file: repository_root.join(CONFIG_FILE_NAME),
             repository_root,
         })
@@ -485,6 +499,10 @@ pub struct ResolvedProjectPaths {
     pub groups_dir: PathBuf,
     /// Absolute battle-summary directory.
     pub battles_dir: PathBuf,
+    /// Absolute checked-in suite-definition directory.
+    pub suites_dir: PathBuf,
+    /// Absolute generated suite-run directory.
+    pub suite_runs_dir: PathBuf,
 }
 
 fn is_environment_name(name: &str) -> bool {

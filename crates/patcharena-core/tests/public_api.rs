@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use chrono::{TimeZone, Utc};
 use patcharena_core::{
     ArtifactPaths, CommandOutcome, CoreError, ProjectConfig, RunGroup, RunGroupStatus, RunResult,
-    TaskCommand, TaskDefinition, TaskId, load_tasks, task_file_path,
+    SuiteDefinition, SuiteId, TaskCommand, TaskDefinition, TaskId, load_suites, load_tasks,
+    suite_file_path, task_file_path,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -240,4 +241,56 @@ fn artifact_paths_must_not_escape_run_directory() {
         audit: None,
     };
     assert!(artifacts.validate().is_err());
+}
+
+#[test]
+fn suite_definition_round_trips_and_fingerprints_stably() {
+    let directory = tempdir().expect("temporary directory");
+    let suite = SuiteDefinition::new(
+        SuiteId::new("core").expect("suite ID"),
+        Some("Core maintenance tasks".to_owned()),
+        vec![
+            TaskId::new("csv-newline").expect("task ID"),
+            TaskId::new("config-validation").expect("task ID"),
+        ],
+    )
+    .expect("suite");
+    let path = suite_file_path(directory.path(), &suite.id);
+    suite.save_new(&path).expect("save suite");
+
+    let loaded = SuiteDefinition::load(&path).expect("load suite");
+    assert_eq!(loaded, suite);
+    assert_eq!(loaded.fingerprint().expect("fingerprint").len(), 64);
+    assert_eq!(load_suites(directory.path()).expect("load suites"), [suite]);
+}
+
+#[test]
+fn suite_definition_rejects_empty_duplicate_and_unknown_fields() {
+    assert!(SuiteDefinition::new(SuiteId::new("empty").unwrap(), None, vec![]).is_err());
+    let repeated = TaskId::new("same").unwrap();
+    assert!(
+        SuiteDefinition::new(
+            SuiteId::new("duplicate").unwrap(),
+            None,
+            vec![repeated.clone(), repeated],
+        )
+        .is_err()
+    );
+    assert!(
+        SuiteDefinition::from_yaml("schema_version: 1\nid: core\ntasks: [one]\nunknown: true\n")
+            .is_err()
+    );
+}
+
+#[test]
+fn schema_one_config_without_suite_paths_uses_safe_defaults() {
+    let config = ProjectConfig::from_toml(
+        "schema_version = 1\n[paths]\nstate_dir = '.patcharena'\ntasks_dir = '.patcharena/tasks'\nruns_dir = '.patcharena/runs'\ngroups_dir = '.patcharena/groups'\nbattles_dir = '.patcharena/battles'\n",
+    )
+    .expect("old config");
+    assert_eq!(config.paths.suites_dir, PathBuf::from(".patcharena/suites"));
+    assert_eq!(
+        config.paths.suite_runs_dir,
+        PathBuf::from(".patcharena/suite-runs")
+    );
 }

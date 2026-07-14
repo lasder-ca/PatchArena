@@ -92,6 +92,15 @@ pub enum CoreError {
         reason: &'static str,
     },
 
+    /// A suite ID was not safe to use as a filename.
+    #[error("invalid suite ID `{value}`: {reason}")]
+    InvalidSuiteId {
+        /// The rejected suite ID.
+        value: String,
+        /// The rule that the ID violated.
+        reason: &'static str,
+    },
+
     /// A path was absolute, traversed a parent, or escaped through a symbolic link.
     #[error("unsafe path `{path}`: {reason}")]
     UnsafePath {

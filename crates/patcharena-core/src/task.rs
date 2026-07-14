@@ -108,17 +108,18 @@ impl<'de> Deserialize<'de> for TaskId {
 }
 
 fn validate_task_id(value: &str) -> Result<()> {
+    validate_portable_id(value).map_err(|reason| CoreError::InvalidTaskId {
+        value: value.to_owned(),
+        reason,
+    })
+}
+
+pub(crate) fn validate_portable_id(value: &str) -> std::result::Result<(), &'static str> {
     if value.is_empty() {
-        return Err(CoreError::InvalidTaskId {
-            value: value.to_owned(),
-            reason: "ID must not be empty",
-        });
+        return Err("ID must not be empty");
     }
     if value.len() > MAX_TASK_ID_BYTES {
-        return Err(CoreError::InvalidTaskId {
-            value: value.to_owned(),
-            reason: "ID must be at most 128 bytes",
-        });
+        return Err("ID must be at most 128 bytes");
     }
 
     let mut bytes = value.bytes();
@@ -126,16 +127,10 @@ fn validate_task_id(value: &str) -> Result<()> {
         .next()
         .is_some_and(|byte| byte.is_ascii_alphanumeric())
     {
-        return Err(CoreError::InvalidTaskId {
-            value: value.to_owned(),
-            reason: "ID must begin with an ASCII letter or digit",
-        });
+        return Err("ID must begin with an ASCII letter or digit");
     }
     if !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
-        return Err(CoreError::InvalidTaskId {
-            value: value.to_owned(),
-            reason: "ID may contain only ASCII letters, digits, hyphens, and underscores",
-        });
+        return Err("ID may contain only ASCII letters, digits, hyphens, and underscores");
     }
 
     let upper = value.to_ascii_uppercase();
@@ -145,10 +140,7 @@ fn validate_task_id(value: &str) -> Result<()> {
             .or_else(|| upper.strip_prefix("LPT"))
             .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
     if is_device {
-        return Err(CoreError::InvalidTaskId {
-            value: value.to_owned(),
-            reason: "ID is a reserved Windows device name",
-        });
+        return Err("ID is a reserved Windows device name");
     }
     Ok(())
 }

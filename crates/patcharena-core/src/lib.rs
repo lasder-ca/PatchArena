@@ -11,6 +11,7 @@ mod error;
 mod fs;
 mod path;
 mod result;
+mod suite;
 mod task;
 
 pub use config::{
@@ -24,6 +25,9 @@ pub use result::{
     AgentMetadata, ArtifactPaths, AuditEvent, BattleAgentResult, BattleResult, BenchmarkIdentity,
     CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome, ExecutionMetadata, RunGroup, RunGroupStatus,
     RunPhase, RunResult, RunSummary, VerificationResult, Violation, ViolationKind,
+};
+pub use suite::{
+    CURRENT_SUITE_SCHEMA_VERSION, SuiteDefinition, SuiteId, load_suites, suite_file_path,
 };
 pub use task::{
     CommandList, ForbiddenRules, StructuredCommand, TaskCommand, TaskDefinition, TaskId,
