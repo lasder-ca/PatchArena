@@ -514,7 +514,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "patcharena-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "patcharena-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "patcharena-git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "patcharena-report"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "patcharena-core",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "patcharena-runner"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",

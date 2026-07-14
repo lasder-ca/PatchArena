@@ -33,7 +33,9 @@ fn init(directory: &Path) {
         .arg("init")
         .assert()
         .success()
-        .stdout(predicate::str::contains("initialized PatchArena"));
+        .stdout(predicate::str::contains("initialized PatchArena"))
+        .stdout(predicate::str::contains("suites:"))
+        .stdout(predicate::str::contains("suite runs:"));
 }
 
 fn commit_base(directory: &Path) {

@@ -8,11 +8,11 @@ PatchArena is a reproducible benchmark runner for AI coding agents on real repos
 
 It runs a versioned repair task in a fresh Git worktree, captures what happened, verifies the result, and stores machine-readable evidence. Repeating the same task makes it possible to compare success, duration, patch size, verification failures, policy violations, and run-to-run variance instead of judging an agent from a single transcript.
 
-**Current release:** v0.2.0, installed from source. There is no crates.io package yet. PatchArena
+**Current release:** v0.3.0, installed from source. There is no crates.io package yet. PatchArena
 follows Semantic Versioning for its CLI and Rust APIs; persisted document schemas are versioned
-independently and additive v0.2.0 fields remain readable alongside v0.1.x evidence.
+independently, and existing schema-1 run evidence remains readable.
 
-[Quick start](#quick-start) · [Task format](#task-definitions) · [Reports](#html-report-example) · [Security](#security) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Suites](#benchmark-suites) · [Task format](#task-definitions) · [Reports](#html-report-example) · [Security](#security) · [Contributing](CONTRIBUTING.md)
 
 > [!WARNING]
 > PatchArena is not a full sandbox. An agent and the configured setup or verification programs run with the operating-system permissions of the PatchArena process. Read [Security](#security) and the [threat model](docs/threat-model.md) before using untrusted inputs.
@@ -56,6 +56,8 @@ PatchArena is an early-stage OSS project. The initial command surface is:
 - `patcharena task add` and `patcharena task list` — create and inspect YAML tasks;
 - `patcharena doctor` — check common project prerequisites;
 - `patcharena agent list` / `patcharena agent doctor <id>` — discover and diagnose adapters;
+- `patcharena suite add/list/run/resume/report` — manage reviewable multi-task suites, preflight
+  cost, checkpoint execution, and render task-by-agent evidence;
 - `patcharena run` — execute one task through a selected agent and persist evidence;
 - `patcharena battle` — run several agents sequentially from the same committed base;
 - `patcharena compare` — compare two persisted run groups;
@@ -135,7 +137,7 @@ To create a comparison group with repository `AGENTS.md` files temporarily hidde
 
 PatchArena records this condition, but the option does not create a context-free agent. It does not hide instructions outside the worktree, other instruction filenames, user/global agent configuration, agent defaults, model-side context, or inputs already observed by setup programs. It therefore does not prove that every other source of agent context is identical.
 
-`init` is idempotent: it keeps an existing valid `patcharena.toml`, reuses safe metadata directories, and does not overwrite existing files. Task definitions may be versioned as part of a benchmark, but keep generated run, group, comparison, and report artifacts—and all secrets—out of version control.
+`init` is idempotent: it keeps an existing valid `patcharena.toml`, reuses safe metadata directories, and does not overwrite existing files. Task and suite definitions should be versioned as benchmark inputs, but keep generated run, group, battle, comparison, suite-run, and report artifacts—and all secrets—out of version control.
 
 ## Command reference
 
@@ -146,6 +148,7 @@ PatchArena records this condition, but the option does not create a context-free
 | `patcharena task list` | List available task IDs and limits. |
 | `patcharena agent list` | List built-in and custom agents, availability, and CLI versions. |
 | `patcharena agent doctor <id>` | Diagnose one adapter without exposing credentials. |
+| `patcharena suite add/list/run/resume/report` | Define and run a checkpointed task-by-agent benchmark matrix. |
 | `patcharena run` | Execute one or more isolated repetitions. |
 | `patcharena battle` | Run multiple agents sequentially against one task and base commit. |
 | `patcharena compare` | Compare two compatible completed groups or individual runs. |
@@ -156,6 +159,48 @@ Use `patcharena <command> --help` for the authoritative option list. Stable erro
 codes are `3` for invalid input or local I/O, `4` for Git or prerequisite failures, `5` for runner
 failures, `6` for completed benchmarks containing failures, and `7` for report or comparison failures. Clap uses its own standard code for argument
 parsing errors.
+
+## Benchmark suites
+
+A suite is a checked-in, ordered list of task IDs. The complete local workflow is:
+
+```bash
+patcharena suite add --id core --task task-a --task task-b
+git add .patcharena/tasks .patcharena/suites patcharena.toml
+git commit -m "Add PatchArena benchmark suite"
+
+patcharena suite run --suite core --agents codex,claude --repeat 3 --dry-run
+patcharena suite run --suite core --agents codex,claude --repeat 3
+patcharena suite resume --run <suite-run-id>
+patcharena suite report --run <suite-run-id> --format html --output report.html
+```
+
+Agents are always explicit: PatchArena rejects duplicates, unknown IDs, and CLIs whose version
+probe is unavailable before creating a suite-run record. `--dry-run` validates the suite, tasks,
+effective policy, selected agents, clean tracked state, and pinned `HEAD`, then prints the task,
+agent, repetition, instruction, and total invocation counts without running an agent. Total work is
+`tasks × agents × repeat`, capped at 1,000 invocations (and 100 tasks) to expose and bound accidental
+cost multiplication. The printed count is a workload estimate, not a currency quote; provider fees,
+token use, rate limits, and network behavior remain external to PatchArena.
+
+Real execution runs the stable task-major, agent-minor matrix sequentially. Every cell produces a
+normal immutable run group, and `.patcharena/suite-runs/<suite-run-id>/suite.json` is atomically
+checkpointed after each cell. `resume` invokes pending cells only and refuses to continue if the
+repository commit, suite fingerprint, task/effective-policy identities, agent list, repetition or
+instruction condition no longer matches. The generated `report.json`, `report.md`, and `report.html`
+sit beside the checkpoint; `suite report` reconstructs output from those persisted run/group records
+without rerunning an agent or verification command.
+
+The report shows coverage, per-agent summaries, and a task-by-agent matrix. Its task-macro success
+rate gives every completed task cell equal weight. Pending or orchestration-error cells retain absent
+metrics instead of fabricated zeroes. PatchArena deliberately makes no winner or statistical-
+significance claim: repeat counts, task representativeness, prompts, setup, verification quality,
+toolchains, models, credentials, and external services remain part of the operator's experimental
+design. Review every task and verifier before trusting a suite result.
+
+Suite execution uses the same direct-argv, bounded-output, worktree, and evidence controls as a
+single run, but multiplication increases both cost and exposure. It is still **not a sandbox**;
+use OS-enforced isolation and clean credentials for untrusted repositories, tasks, or agents.
 
 ## Task definitions
 
@@ -318,9 +363,9 @@ inspect failed attempts, and publish the raw methodology rather than claiming a 
 
 PatchArena application releases follow SemVer: additive features use a minor release, compatible
 fixes a patch release, and incompatible CLI/API behavior a major release. `schema_version` is a
-separate on-disk contract and remains `1` in v0.2.0. New results retain the legacy string `agent`
-field and add `patcharena_version`, `agent_metadata`, and `execution_metadata`; old v0.1.x schema-1
-results continue to load. Battle summaries have their own schema and application-version fields.
+separate on-disk contract and remains `1` in v0.3.0. Existing schema-1 run/group evidence continues
+to load. Battle summaries, suite definitions, and suite execution checkpoints carry their own
+validated schema and application-version context.
 
 ## Security
 

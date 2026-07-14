@@ -8,6 +8,37 @@ version is tagged.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-14
+
+### Added
+
+- Versioned `.patcharena/suites/*.yaml` definitions for ordered, reviewable multi-task benchmarks.
+- `patcharena suite add`, `list`, `run --dry-run`, `run`, `resume`, and `report` for an explicit
+  task-by-agent Cartesian workflow.
+- Atomic per-cell suite checkpoints, pending-only resume, and automatic JSON, Markdown, and
+  self-contained HTML matrix reports derived from persisted run/group evidence.
+- Coverage and equal-task-weight agent summaries that keep pending and orchestration-error metrics
+  absent and deliberately make no winner or statistical-significance claim.
+
+### Changed
+
+- Workspace and CLI version advanced from 0.2.0 to 0.3.0 while existing run/config schema-1
+  evidence remains readable.
+- `patcharena init` and `doctor` now manage and validate suite definition and generated suite-run
+  directories.
+
+### Compatibility and security
+
+- Suite preflight pins the committed revision and each task/effective-policy identity, requires
+  available explicit agents, rejects duplicates, limits definitions to 100 tasks, and caps a plan
+  at 1,000 agent invocations.
+- Resume refuses changes to the suite fingerprint, repository commit, task identities, agent order,
+  repetition, or instruction condition; completed cells are never rerun.
+- Suite reports reject missing, duplicate, unreferenced, or incompatible group evidence and
+  revalidate aggregates against persisted run details.
+- Suites retain the existing security boundary: detached worktrees, direct argv construction,
+  limits, and audits are defense in depth, not a filesystem, process, network, or cost sandbox.
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
@@ -42,6 +73,7 @@ version is tagged.
 - Linux CI, an explicit Rust 1.85 MSRV job, security documentation, and contributor guidance.
 - A complete Japanese README with language navigation from the English README.
 
-[Unreleased]: https://github.com/lasder-ca/PatchArena/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/lasder-ca/PatchArena/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lasder-ca/PatchArena/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lasder-ca/PatchArena/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lasder-ca/PatchArena/releases/tag/v0.1.0

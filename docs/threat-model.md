@@ -14,7 +14,7 @@ PatchArena aims to protect:
 - repository history, remotes, and the user's Git configuration;
 - credentials in environment variables, home-directory files, credential helpers, and agent sockets;
 - availability of the host through bounded time and captured output;
-- integrity and provenance of task definitions, patches, logs, results, and reports;
+- integrity and provenance of task/suite definitions, checkpoints, patches, logs, results, and reports;
 - reproducibility: a failure or policy violation must not be silently represented as success.
 
 ## Untrusted inputs
@@ -22,7 +22,7 @@ PatchArena aims to protect:
 Treat all of the following as attacker-controlled:
 
 - the target repository, including hooks, submodules, build scripts, symlinks, and filenames;
-- task YAML, prompts, setup commands, and verification commands;
+- task and suite YAML, prompts, setup commands, and verification commands;
 - agent-generated source, commands, output, and filenames;
 - existing `.patcharena` contents and imported run records;
 - output consumed by Markdown or HTML report generation.
@@ -35,7 +35,7 @@ Git, any shell explicitly selected by a task, coding-agent CLIs or custom execut
 
 Runs use a fresh detached Git worktree so repeats do not intentionally edit the user's primary checkout. It remains a linked worktree: the checkout shares the repository's common object database, refs, and configuration. PatchArena compares selected Git state before and after execution, but that is detection rather than prevention and is not a complete audit of the object database, reflogs, hooks, remotes, or network side effects.
 
-Every task ID, run ID, artifact name, forbidden path, and derived path must be validated before joining it to a root. Path traversal is rejected: absolute paths, empty or special components, `..` components, platform prefixes, and paths whose canonical destination escapes the expected root are invalid.
+Every task ID, suite ID, run or suite-run UUID, artifact name, forbidden path, and derived path must be validated before joining it to a root. Path traversal is rejected: absolute paths, empty or special components, `..` components, platform prefixes, and paths whose canonical destination escapes the expected root are invalid.
 
 Canonicalization alone is not sufficient when a final path does not yet exist or can be raced. File creation, artifact collection, and cleanup must check existing ancestors and avoid following user-controlled symbolic links. Repository symlinks may point outside the worktree; commands executed inside the worktree can follow them. PatchArena detects forbidden or escaped paths where feasible, but it cannot prevent arbitrary filesystem access by an unconfined child process.
 
@@ -67,6 +67,16 @@ Internal Git subprocesses do not currently have a separate deadline. A corrupt r
 
 Captured stdout and stderr have byte limits to prevent unbounded in-memory and on-disk logs. Pipe draining after timeout is also bounded so a surviving descendant holding a pipe open cannot block the runner indefinitely. Truncation is recorded and must not turn a failed command into a success. Output limits do not bound files created directly by the agent, compiler caches, repository growth, CPU, memory, process count, or network traffic. Apply OS/container resource quotas for those controls.
 
+### Suite expansion, cost, and checkpoint integrity
+
+A suite multiplies privileged agent work as `tasks × agents × repeat`. PatchArena requires an explicit non-duplicate agent list, limits definitions to 100 tasks, caps a plan at 1,000 agent invocations, and offers `--dry-run` to validate and print that count before any run/group/suite-run record is created. These controls reduce accidental multiplication; they do not estimate provider currency cost, tokens, rate limits, network use, or cumulative host resources. An operator must choose an affordable plan and apply an external overall budget/deadline. A malicious task can still make each allowed invocation expensive.
+
+Suite preflight and normal progress output disclose suite/task/agent IDs, counts, status, fingerprints, UUIDs, bounded errors, and artifact paths. They do not print task prompts or child environment values. Suite definitions contain IDs and an optional description rather than prompt bodies, but referenced task YAML and generated run artifacts still contain sensitive benchmark input and output. Do not put secrets in suite descriptions, IDs, prompts, or task files; do not treat metadata-only console output as evidence that underlying artifacts are safe to publish.
+
+`suite.json` is an unsigned local checkpoint, not an attestation. It is schema-validated, tied to its UUID path, and atomically replaced after every terminal cell. A completed cell must reference one group UUID; pending and error cells cannot smuggle group evidence. Resume re-runs preflight and refuses identity drift in the committed `HEAD`, suite fingerprint, task/effective-policy fingerprints, ordered agents, repeat count, or instruction condition. It invokes only pending cells. This prevents accidental continuation under changed inputs but does not stop a local attacker with write access from replacing a coherent set of checkpoint, group, and run records.
+
+Suite reports load only groups referenced by completed cells and revalidate task, agent, benchmark identity, instruction policy, requested/observed counts, and aggregates against run details. Missing, duplicate, extra, or incompatible evidence is an error; pending/error metrics remain absent rather than becoming zero. Reports make no winner or statistical-significance claim. Task quality, representativeness, and verifier correctness are human review responsibilities and can invalidate a technically intact checkpoint.
+
 ### Forbidden paths and operation auditing
 
 Git diff and status provide the primary patch inventory, but do not expose all ignored-file or shared-Git-metadata changes. PatchArena therefore also fingerprints every configured forbidden path before command execution and during final inspection, independently of Git. This can detect a change to an ignored path such as `.env`.
@@ -85,7 +95,7 @@ The identity is not signed and does not defend against maliciously edited artifa
 
 Run directories should be created with owner-only permissions where supported. Existing directories and symlinks are rejected rather than reused blindly, and result files should be written without following symlinks. Other operating systems, inherited ACLs, backup tools, and filesystem mounts may weaken mode-bit guarantees.
 
-Logs, patches, HTML reports, JSON records, and error messages can contain secrets from source files, child-process output, expanded commands, URLs, or agent responses. Output capture does not perform reliable secret redaction. Protect `.patcharena/runs`, avoid publishing artifacts without review, and apply retention/deletion policies appropriate to the repository. Report generators must escape untrusted text to prevent HTML/script injection when a report is opened.
+Logs, patches, HTML reports, JSON records, suite checkpoints, and error messages can contain secrets from source files, child-process output, expanded commands, URLs, descriptions, or agent responses. Output capture does not perform reliable secret redaction. Protect `.patcharena/runs` and `.patcharena/suite-runs`, avoid publishing artifacts without review, and apply retention/deletion policies appropriate to the repository. Report generators must escape untrusted text to prevent HTML/script injection when a report is opened.
 
 ## Threats not fully mitigated in the MVP
 
@@ -98,6 +108,7 @@ Logs, patches, HTML reports, JSON records, and error messages can contain secret
 - hostile repositories exploiting vulnerabilities in PatchArena or external tools;
 - semantic policy bypasses that do not match forbidden-command or forbidden-path rules;
 - forbidden-path changes outside configured roots, between snapshots, or beyond inventory limits.
+- financial or availability damage from many individually valid suite invocations or external provider behavior.
 
 ## Recommended deployment profile
 
@@ -108,9 +119,9 @@ For untrusted benchmarks:
 3. Remove secrets, credential helpers, agent sockets, and cloud metadata access.
 4. Deny network access unless the benchmark explicitly requires a controlled mirror.
 5. Apply CPU, memory, process, file-size, total-disk, and wall-clock limits externally.
-6. Review task definitions before execution and inspect artifacts before publishing them.
+6. Review task and suite definitions, run suite `--dry-run`, set an external total budget/deadline, and inspect artifacts before publishing them.
 7. Destroy the environment after the run.
 
 ## Security review checklist
 
-Changes to process spawning, environment construction, path resolution, worktree creation/cleanup, artifact writes, HTML escaping, schema parsing, or policy matching require focused negative tests. At minimum, cover traversal, absolute paths, symbolic links, oversized output, timeout/descendant behavior, forbidden paths, invalid schema versions, and secret-like environment variables.
+Changes to process spawning, environment construction, path resolution, worktree creation/cleanup, artifact writes, suite expansion/resume, HTML escaping, schema parsing, or policy matching require focused negative tests. At minimum, cover traversal, absolute paths, symbolic links, oversized output, timeout/descendant behavior, invocation caps, duplicate agents, checkpoint/path ID mismatches, resume identity drift, incompatible group evidence, forbidden paths, invalid schema versions, and secret-like environment variables.

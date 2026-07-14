@@ -1,18 +1,43 @@
 # Architecture
 
-PatchArena turns a versioned task definition, repository revision, and effective execution policy into repeatable run records, then compares or renders those records. The design keeps domain data independent of process, Git, and presentation concerns so security-sensitive boundaries can be reviewed in isolation.
+PatchArena turns versioned task and suite definitions, a repository revision, and effective execution policy into repeatable run records, then compares or renders only those persisted records. The design keeps domain data independent of process, Git, and presentation concerns so security-sensitive boundaries can be reviewed in isolation.
 
 ## Workspace responsibilities
 
 | Crate | Responsibility |
 | --- | --- |
-| `patcharena-core` | Configuration, YAML task definitions, run/result schemas, validation, identifiers, and shared errors. |
+| `patcharena-core` | Configuration, YAML task/suite definitions, run/result/suite-execution schemas, validation, identifiers, and shared errors. |
 | `patcharena-git` | Repository discovery, temporary Git worktrees, cleanup, patch capture, changed-file enumeration, and diff statistics. |
-| `patcharena-runner` | Run orchestration, bounded process execution, the adapter registry, Codex/Claude/Gemini/custom adapters, and deterministic fake runners. |
-| `patcharena-report` | Run-group aggregation, comparison, and Markdown, JSON, and self-contained HTML output. |
+| `patcharena-runner` | Run and checkpointed suite orchestration, bounded process execution, the adapter registry, Codex/Claude/Gemini/custom adapters, and deterministic fake runners. |
+| `patcharena-report` | Run-group aggregation, validated suite matrices, comparison, and Markdown, JSON, and self-contained HTML output. |
 | `patcharena-cli` | `clap` command routing, tracing setup, user-facing diagnostics, and process exit status. |
 
 The preferred dependency direction is CLI/report/runner/git toward core. Git and process details should not leak into serialized domain models unless they are stable parts of the run schema.
+
+## Suite flow
+
+Suite definitions sit above normal tasks and run groups; they do not introduce a second execution or evidence format.
+
+```text
+tracked suite YAML ──> ordered tracked task YAML files
+        + explicit ordered agents + repeat + instruction condition
+                              |
+                              v
+         preflight committed HEAD, task/policy identities,
+         agent availability, and tasks × agents × repeat <= 1,000
+                              |
+                              v
+        SuiteExecution: task-major × agent-minor pending cells
+                              |
+                    one existing run group per cell
+                              |
+            atomically replace suite.json after each cell
+                              |
+                              v
+     JSON / Markdown / HTML matrix from persisted groups only
+```
+
+The definition is limited to 100 unique tasks and the complete Cartesian plan to 1,000 agent invocations. Execution is sequential so checkpoint order is deterministic and existing process/resource controls apply to one cell at a time. A completed cell points to exactly one immutable group UUID; an orchestration error stores a bounded diagnostic; a pending cell has neither. Resume reconstructs preflight and proceeds only when the suite fingerprint, committed revision, per-task benchmark identities, ordered agent IDs, repeat count, and instruction condition still match. It never reruns a terminal cell.
 
 ## Run flow
 
@@ -72,8 +97,15 @@ The selected agent and instructions-on/off mode remain separate recorded dimensi
 
 ```text
 .patcharena/
-├── tasks/                 # YAML task definitions
-├── groups/                # repeat-run group metadata
+├── tasks/                 # tracked YAML task definitions
+├── suites/                # tracked YAML suite definitions
+├── groups/                # generated repeat-run group metadata
+├── suite-runs/
+│   └── <suite-run-id>/
+│       ├── suite.json     # atomically checkpointed execution matrix
+│       ├── report.json    # evidence-derived machine report
+│       ├── report.md      # evidence-derived review report
+│       └── report.html    # evidence-derived standalone report
 └── runs/
     └── <run-id>/
         ├── result.json    # versioned, machine-readable outcome
@@ -108,9 +140,9 @@ Adding an agent requires an implementation that accepts a validated request, use
 
 ## Reporting
 
-Report generation consumes persisted records only; it does not rerun agents or verification commands. JSON is intended for automation, Markdown for review, and HTML for a portable local report. HTML output embeds its styles, requires no external assets, and must escape all repository-, task-, command-, and agent-controlled text.
+Report generation consumes persisted records only; it does not rerun agents or verification commands. A suite report accepts only completed groups referenced by its checkpoint and revalidates task, agent, benchmark identity, instruction policy, requested/observed counts, and aggregate values against per-run evidence. Extra, duplicate, missing, or incompatible groups are errors. JSON is intended for automation, Markdown for review, and HTML for a portable local report. HTML output embeds its styles, requires no external assets, and must escape all repository-, task-, command-, and agent-controlled text.
 
-Comparisons report success rate, median duration, file and line deltas, verification failures, policy violations, and run-to-run variance. They are produced only for complete, equal-size groups with matching requested/observed counts, task IDs, and benchmark identities. Reports can still render incomplete groups and label their status. Missing or incompatible evidence is reported explicitly rather than treated as success.
+Comparisons report success rate, median duration, file and line deltas, verification failures, policy violations, and run-to-run variance. They are produced only for complete, equal-size groups with matching requested/observed counts, task IDs, and benchmark identities. Suite task-macro success gives each complete task cell equal weight; pending and error cells have absent metrics, not artificial zeroes. Neither comparison path declares a global winner or statistical significance. Reports can still render incomplete evidence and label its status. Missing or incompatible evidence is reported explicitly rather than treated as success.
 
 ## Failure and cleanup behavior
 

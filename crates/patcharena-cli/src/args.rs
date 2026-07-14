@@ -107,7 +107,7 @@ pub struct SuiteRunArgs {
     #[arg(long)]
     pub suite: String,
     /// Comma-separated stable agent IDs in execution order.
-    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    #[arg(long, required = true, value_delimiter = ',', num_args = 1..)]
     pub agents: Vec<String>,
     /// Independent repetitions for every task-and-agent cell.
     #[arg(long, default_value_t = NonZeroU32::MIN)]
@@ -397,5 +397,10 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn suite_run_requires_explicit_agents() {
+        assert!(Cli::try_parse_from(["patcharena", "suite", "run", "--suite", "core"]).is_err());
     }
 }

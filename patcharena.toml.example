@@ -12,6 +12,8 @@ tasks_dir = ".patcharena/tasks"
 runs_dir = ".patcharena/runs"
 groups_dir = ".patcharena/groups"
 battles_dir = ".patcharena/battles"
+suites_dir = ".patcharena/suites"
+suite_runs_dir = ".patcharena/suite-runs"
 
 [defaults]
 # Project numeric values are execution-time safety ceilings and are copied into

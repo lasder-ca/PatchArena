@@ -65,7 +65,9 @@ fn init() -> Result<u8, CliError> {
         );
     }
     println!("tasks: {}", paths.tasks_dir.display());
-    println!("runs:  {}", paths.runs_dir.display());
+    println!("suites: {}", paths.suites_dir.display());
+    println!("runs: {}", paths.runs_dir.display());
+    println!("suite runs: {}", paths.suite_runs_dir.display());
     Ok(EXIT_SUCCESS)
 }
 

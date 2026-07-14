@@ -1,0 +1,5 @@
+schema_version: 1
+id: rust-basic
+description: Basic Rust maintenance benchmark
+tasks:
+  - rust-addition
