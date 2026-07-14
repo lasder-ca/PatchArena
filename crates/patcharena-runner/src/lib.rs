@@ -9,6 +9,7 @@ mod instructions;
 mod orchestration;
 mod process;
 mod registry;
+mod suite;
 
 pub use agent::{
     AdapterRunner, AgentAdapter, AgentContext, AgentDescriptor, AgentExecution, AgentInvocation,
@@ -17,9 +18,14 @@ pub use agent::{
 pub use agents::{ClaudeAdapter, CodexAdapter, CodexRunner, CustomAdapter, GeminiAdapter};
 pub use audit::{command_contains_forbidden, extract_codex_commands, path_is_forbidden};
 pub use instructions::InstructionMask;
-pub use orchestration::{ArenaRunner, GroupExecution, MAX_REPEAT, RunnerSettings};
+pub use orchestration::{
+    ArenaRunner, GroupExecution, MAX_REPEAT, RunnerSettings, benchmark_identity,
+};
 pub use process::{ProcessOutput, ProcessRequest, execute_process, parse_command};
 pub use registry::AgentRegistry;
+pub use suite::{
+    MAX_SUITE_INVOCATIONS, SelectedSuiteAgent, SuiteExecutionOutcome, SuitePlan, SuiteRunner,
+};
 
 /// Errors produced while running an agent or benchmark command.
 #[derive(Debug, thiserror::Error)]

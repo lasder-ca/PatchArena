@@ -648,36 +648,7 @@ impl ArenaRunner {
     }
 
     fn benchmark_identity(&self, task: &TaskDefinition) -> Result<BenchmarkIdentity, RunnerError> {
-        let repository_commit = self.repository.resolve_commit("HEAD")?;
-        let mut hasher = Sha256::new();
-        hash_field(&mut hasher, task.to_yaml()?.as_bytes());
-        for value in [
-            task.limits
-                .timeout_seconds
-                .min(self.settings.timeout_seconds),
-            task.limits
-                .max_output_bytes
-                .min(self.settings.max_output_bytes),
-            task.limits
-                .max_changed_files
-                .min(self.settings.max_changed_files),
-            task.limits.max_diff_lines.min(self.settings.max_diff_lines),
-        ] {
-            hash_field(&mut hasher, &value.to_le_bytes());
-        }
-        for variable in &self.settings.environment_allowlist {
-            hash_field(&mut hasher, variable.as_bytes());
-        }
-        for command in merge_strings(&self.settings.forbidden_commands, &task.forbidden.commands) {
-            hash_field(&mut hasher, command.as_bytes());
-        }
-        for path in merge_paths(&self.settings.forbidden_paths, &task.forbidden.paths) {
-            hash_field(&mut hasher, path.as_os_str().as_encoded_bytes());
-        }
-        Ok(BenchmarkIdentity {
-            repository_commit,
-            task_fingerprint: format!("{:x}", hasher.finalize()),
-        })
+        benchmark_identity(&self.repository, &self.settings, task)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -807,7 +778,10 @@ fn agent_command_outcome(command: String, execution: &AgentExecution) -> Command
     }
 }
 
-fn ensure_private_contained_directory(root: &Path, directory: &Path) -> Result<(), RunnerError> {
+pub(crate) fn ensure_private_contained_directory(
+    root: &Path,
+    directory: &Path,
+) -> Result<(), RunnerError> {
     let canonical_root = fs::canonicalize(root).map_err(|source| RunnerError::Io {
         operation: "canonicalize repository root",
         path: root.to_path_buf(),
@@ -860,7 +834,7 @@ fn ensure_private_contained_directory(root: &Path, directory: &Path) -> Result<(
     Ok(())
 }
 
-fn create_private_directory(path: &Path) -> Result<(), RunnerError> {
+pub(crate) fn create_private_directory(path: &Path) -> Result<(), RunnerError> {
     fs::create_dir(path).map_err(|source| RunnerError::Io {
         operation: "create private directory",
         path: path.to_path_buf(),
@@ -1319,6 +1293,44 @@ fn deduplicate_errors(errors: Vec<String>) -> Vec<String> {
 fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
+}
+
+/// Calculate the repository commit and task/policy fingerprint used by a run group.
+///
+/// This is side-effect free apart from reading the repository and lets suite preflight pin every
+/// task identity before the first agent invocation.
+pub fn benchmark_identity(
+    repository: &Repository,
+    settings: &RunnerSettings,
+    task: &TaskDefinition,
+) -> Result<BenchmarkIdentity, RunnerError> {
+    task.validate()?;
+    let repository_commit = repository.resolve_commit("HEAD")?;
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, task.to_yaml()?.as_bytes());
+    for value in [
+        task.limits.timeout_seconds.min(settings.timeout_seconds),
+        task.limits.max_output_bytes.min(settings.max_output_bytes),
+        task.limits
+            .max_changed_files
+            .min(settings.max_changed_files),
+        task.limits.max_diff_lines.min(settings.max_diff_lines),
+    ] {
+        hash_field(&mut hasher, &value.to_le_bytes());
+    }
+    for variable in &settings.environment_allowlist {
+        hash_field(&mut hasher, variable.as_bytes());
+    }
+    for command in merge_strings(&settings.forbidden_commands, &task.forbidden.commands) {
+        hash_field(&mut hasher, command.as_bytes());
+    }
+    for path in merge_paths(&settings.forbidden_paths, &task.forbidden.paths) {
+        hash_field(&mut hasher, path.as_os_str().as_encoded_bytes());
+    }
+    Ok(BenchmarkIdentity {
+        repository_commit,
+        task_fingerprint: format!("{:x}", hasher.finalize()),
+    })
 }
 
 #[cfg(test)]
