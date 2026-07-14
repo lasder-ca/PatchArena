@@ -164,7 +164,7 @@ patcharena suite report --run <suite-run-id> --format html --output report.html
 
 agentは常に明示指定します。suite-run recordを作る前に、重複・未知のID・version probeが利用できないCLIを拒否します。`--dry-run`はsuite、task、有効policy、agent、追跡対象fileのclean状態、固定`HEAD`を検証し、task数、agent数、反復数、instructions条件、総invocation数だけを表示してagentを起動しません。総作業量は`tasks × agents × repeat`で、誤操作による費用増幅を見える化して抑えるため1,000 invocation（taskは100件）を上限にします。この件数は作業量の目安であり金額見積りではありません。provider料金、token使用量、rate limit、network動作はPatchArenaの管理外です。
 
-本実行はtask-major、agent-minorの固定matrixを順番に処理します。各cellは通常のimmutable run groupを生成し、`.patcharena/suite-runs/<suite-run-id>/suite.json`をcellごとにatomic checkpointします。`resume`はpending cellだけを実行し、repository commit、suite fingerprint、task／有効policy identity、agent一覧、反復数、instructions条件が変わっていれば再開を拒否します。`report.json`、`report.md`、`report.html`はcheckpointと同じdirectoryへ生成されます。`suite report`は保存済みrun/group証拠だけから再構築し、agentやverify commandを再実行しません。
+本実行は検証済みplanを開始前に表示し、task-major、agent-minorの固定matrixを順番に処理します。各cellは通常のimmutable run groupを生成し、`.patcharena/suite-runs/<suite-run-id>/suite.json`へのatomic checkpointが成功した時点で進捗を表示します。`resume`はpending cellだけを実行し、repository commit、suite fingerprint、task／有効policy identity、agent一覧、反復数、instructions条件が変わっていれば再開を拒否します。`report.json`、`report.md`、`report.html`はcheckpointと同じdirectoryへ生成されます。`suite report`は保存済みrun/group証拠だけから再構築し、agentやverify commandを再実行しません。
 
 レポートはcoverage、agent別summary、task-by-agent matrixを表示します。task-macro成功率では、完了した各task cellを同じ重みで扱います。pendingまたはorchestration errorのcellは、0という架空値ではなくmetric欠測のままです。PatchArenaはwinnerや統計的有意性を宣言しません。反復数、taskの代表性、prompt、setup、verify品質、toolchain、model、credential、外部serviceは利用者の実験設計です。suite結果を信頼する前に、すべてのtaskとverifierをreviewしてください。
 

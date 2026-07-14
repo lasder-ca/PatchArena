@@ -1,13 +1,15 @@
 //! Checkpointed multi-task, multi-agent benchmark suite orchestration.
 
 use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
+pub use patcharena_core::MAX_SUITE_INVOCATIONS;
 use patcharena_core::{
-    SuiteDefinition, SuiteExecution, SuiteExecutionStatus, SuiteTaskSnapshot, TaskDefinition,
-    suite_checkpoint_path, suite_run_directory,
+    SuiteCellStatus, SuiteDefinition, SuiteExecution, SuiteExecutionStatus, SuiteTaskSnapshot,
+    TaskDefinition, suite_checkpoint_path, suite_run_directory,
 };
 use patcharena_git::Repository;
 
@@ -16,8 +18,7 @@ use crate::{
     AgentRunner, ArenaRunner, MAX_REPEAT, RunnerError, RunnerSettings, benchmark_identity,
 };
 
-/// Maximum task-agent invocations accepted in one suite plan.
-pub const MAX_SUITE_INVOCATIONS: u64 = 1_000;
+const MAX_SUITE_AGENTS: usize = 100;
 
 /// One explicit agent selected for a suite in stable CLI order.
 #[derive(Clone)]
@@ -41,24 +42,101 @@ impl std::fmt::Debug for SelectedSuiteAgent {
 #[derive(Clone, Debug)]
 pub struct SuitePlan {
     /// Suite definition loaded for this plan.
-    pub definition: SuiteDefinition,
+    definition: SuiteDefinition,
     /// Task documents loaded once in suite order.
-    pub tasks: Vec<TaskDefinition>,
+    tasks: Vec<TaskDefinition>,
     /// Per-task expected benchmark identities pinned during preflight.
-    pub task_snapshots: Vec<SuiteTaskSnapshot>,
+    task_snapshots: Vec<SuiteTaskSnapshot>,
     /// Explicit agent IDs in execution order.
-    pub agents: Vec<String>,
+    agents: Vec<String>,
     /// Repetitions requested for every task-agent cell.
-    pub repeat: u32,
+    repeat: u32,
     /// Whether repository instruction files remain visible.
-    pub instructions_enabled: bool,
+    instructions_enabled: bool,
     /// Shared repository commit pinned before agent execution.
-    pub repository_commit: String,
+    repository_commit: String,
     /// Fingerprint of the canonical suite definition.
-    pub suite_fingerprint: String,
+    suite_fingerprint: String,
     /// Total planned agent invocations across all cells.
-    pub invocation_count: u64,
+    invocation_count: u64,
 }
+
+impl SuitePlan {
+    /// Validated suite definition.
+    #[must_use]
+    pub fn definition(&self) -> &SuiteDefinition {
+        &self.definition
+    }
+
+    /// Validated task documents in execution order.
+    #[must_use]
+    pub fn tasks(&self) -> &[TaskDefinition] {
+        &self.tasks
+    }
+
+    /// Pinned task identities in execution order.
+    #[must_use]
+    pub fn task_snapshots(&self) -> &[SuiteTaskSnapshot] {
+        &self.task_snapshots
+    }
+
+    /// Explicit agent IDs in execution order.
+    #[must_use]
+    pub fn agents(&self) -> &[String] {
+        &self.agents
+    }
+
+    /// Independent invocations requested for every cell.
+    #[must_use]
+    pub const fn repeat(&self) -> u32 {
+        self.repeat
+    }
+
+    /// Whether repository instruction files remain visible.
+    #[must_use]
+    pub const fn instructions_enabled(&self) -> bool {
+        self.instructions_enabled
+    }
+
+    /// Full repository commit pinned during preflight.
+    #[must_use]
+    pub fn repository_commit(&self) -> &str {
+        &self.repository_commit
+    }
+
+    /// Canonical suite-definition fingerprint.
+    #[must_use]
+    pub fn suite_fingerprint(&self) -> &str {
+        &self.suite_fingerprint
+    }
+
+    /// Checked total invocation count.
+    #[must_use]
+    pub const fn invocation_count(&self) -> u64 {
+        self.invocation_count
+    }
+}
+
+/// One durably checkpointed cell-completion event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuiteCellProgress {
+    /// Number of completed or error cells now stored in the checkpoint.
+    pub finished_cells: usize,
+    /// Total cells in the immutable execution matrix.
+    pub total_cells: usize,
+    /// Stable task ID.
+    pub task_id: String,
+    /// Stable agent ID.
+    pub agent_id: String,
+    /// Durable terminal cell status.
+    pub status: SuiteCellStatus,
+    /// Immutable group UUID for a completed cell.
+    pub group_id: Option<String>,
+    /// Bounded diagnostic for an orchestration-error cell.
+    pub error: Option<String>,
+}
+
+type ProgressCallback = dyn Fn(&SuiteCellProgress) + Send + Sync;
 
 /// Final execution state plus its durable checkpoint location.
 #[derive(Clone, Debug)]
@@ -78,6 +156,7 @@ pub struct SuiteRunner {
     agents: Vec<SelectedSuiteAgent>,
     settings: RunnerSettings,
     patcharena_version: String,
+    progress: Option<Arc<ProgressCallback>>,
 }
 
 impl std::fmt::Debug for SuiteRunner {
@@ -91,6 +170,7 @@ impl std::fmt::Debug for SuiteRunner {
             .field("agents", &self.agents)
             .field("settings", &self.settings)
             .field("patcharena_version", &self.patcharena_version)
+            .field("progress_enabled", &self.progress.is_some())
             .finish()
     }
 }
@@ -118,8 +198,19 @@ impl SuiteRunner {
                 "a suite requires at least one explicit agent".to_owned(),
             ));
         }
+        if agents.len() > MAX_SUITE_AGENTS {
+            return Err(RunnerError::Agent(format!(
+                "a suite supports at most {MAX_SUITE_AGENTS} explicit agents"
+            )));
+        }
         let mut ids = HashSet::with_capacity(agents.len());
         for agent in &agents {
+            if !portable_agent_id(&agent.id) {
+                return Err(RunnerError::Agent(format!(
+                    "suite agent ID `{}` must use 1 to 128 lowercase ASCII letters, digits, or hyphens",
+                    agent.id
+                )));
+            }
             if agent.id != agent.runner.name() {
                 return Err(RunnerError::Agent(format!(
                     "selected agent ID `{}` does not match runner name `{}`",
@@ -148,7 +239,18 @@ impl SuiteRunner {
             agents,
             settings,
             patcharena_version,
+            progress: None,
         })
+    }
+
+    /// Report each terminal cell immediately after its checkpoint replacement succeeds.
+    #[must_use]
+    pub fn with_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&SuiteCellProgress) + Send + Sync + 'static,
+    {
+        self.progress = Some(Arc::new(callback));
+        self
     }
 
     /// Validate a complete suite plan without creating run, group, or suite-run records.
@@ -185,17 +287,7 @@ impl SuiteRunner {
             );
         }
         let repository_commit = self.repository.resolve_commit("HEAD")?;
-        let task_count = u64::try_from(tasks.len()).unwrap_or(u64::MAX);
-        let agent_count = u64::try_from(self.agents.len()).unwrap_or(u64::MAX);
-        let invocation_count = task_count
-            .checked_mul(agent_count)
-            .and_then(|count| count.checked_mul(u64::from(repeat)))
-            .ok_or_else(|| RunnerError::Agent("suite invocation count overflowed".to_owned()))?;
-        if invocation_count > MAX_SUITE_INVOCATIONS {
-            return Err(RunnerError::Agent(format!(
-                "suite plans at most 1,000 agent invocations; requested {invocation_count}"
-            )));
-        }
+        let invocation_count = checked_invocation_count(tasks.len(), self.agents.len(), repeat)?;
         let task_snapshots = tasks
             .iter()
             .map(|task| {
@@ -224,7 +316,6 @@ impl SuiteRunner {
 
     /// Execute a preflighted suite plan and return its durable terminal checkpoint.
     pub async fn execute(&self, plan: SuitePlan) -> Result<SuiteExecutionOutcome, RunnerError> {
-        self.validate_plan_agents(&plan)?;
         let execution = self.create_checkpoint(&plan)?;
         self.execute_pending(execution, &plan).await
     }
@@ -263,18 +354,13 @@ impl SuiteRunner {
                     .to_owned(),
             ));
         }
-        let checkpoint = self.checkpoint_path(&execution)?;
-        if !checkpoint.is_file() {
-            return Err(RunnerError::Agent(format!(
-                "suite checkpoint `{}` is missing",
-                checkpoint.display()
-            )));
-        }
+        let checkpoint = self.validate_checkpoint_directory(&execution)?;
+        validate_regular_checkpoint(&checkpoint)?;
         self.execute_pending(execution, &plan).await
     }
 
     fn create_checkpoint(&self, plan: &SuitePlan) -> Result<SuiteExecution, RunnerError> {
-        self.validate_plan_agents(plan)?;
+        self.validate_plan(plan)?;
         let execution = SuiteExecution::new(
             self.patcharena_version.clone(),
             plan.definition.id.clone(),
@@ -302,11 +388,12 @@ impl SuiteRunner {
         mut execution: SuiteExecution,
         plan: &SuitePlan,
     ) -> Result<SuiteExecutionOutcome, RunnerError> {
+        let checkpoint_path = self.validate_checkpoint_directory(&execution)?;
+        validate_regular_checkpoint(&checkpoint_path)?;
         let pending = execution.pending_cells().cloned().collect::<Vec<_>>();
         for cell in pending {
             if let Err(error) = self.validate_shared_basis(plan, &cell.task_id) {
-                execution.mark_aborted(Utc::now())?;
-                execution.save_replace(self.checkpoint_path(&execution)?)?;
+                self.abort_checkpoint(&mut execution)?;
                 return Err(error);
             }
             let task = plan
@@ -335,28 +422,78 @@ impl SuiteRunner {
                 .await
             {
                 Ok(group) => {
-                    self.validate_group(&group.group, plan, task, &agent.id)?;
-                    execution.complete_cell(
+                    if let Err(error) = self.validate_shared_basis(plan, &cell.task_id) {
+                        self.abort_checkpoint(&mut execution)?;
+                        return Err(error);
+                    }
+                    if let Err(error) = self.validate_group(&group.group, plan, task, &agent.id) {
+                        self.abort_checkpoint(&mut execution)?;
+                        return Err(error);
+                    }
+                    if let Err(error) = execution.complete_cell(
                         task.id.as_str(),
                         &agent.id,
                         group.group.group_id,
                         Utc::now(),
-                    )?;
+                    ) {
+                        self.abort_checkpoint(&mut execution)?;
+                        return Err(error.into());
+                    }
                 }
                 Err(error) => {
                     let diagnostic = bounded_error(&error.to_string());
                     execution.error_cell(task.id.as_str(), &agent.id, &diagnostic, Utc::now())?;
                 }
             }
-            execution.save_replace(self.checkpoint_path(&execution)?)?;
+            self.replace_checkpoint(&execution)?;
+            self.emit_progress(&execution, cell.task_id.as_str(), &cell.agent_id);
         }
         execution.mark_finished(Utc::now())?;
-        let checkpoint_path = self.checkpoint_path(&execution)?;
-        execution.save_replace(&checkpoint_path)?;
+        self.replace_checkpoint(&execution)?;
         Ok(SuiteExecutionOutcome {
             execution,
             checkpoint_path,
         })
+    }
+
+    fn abort_checkpoint(&self, execution: &mut SuiteExecution) -> Result<(), RunnerError> {
+        execution.mark_aborted(Utc::now())?;
+        self.replace_checkpoint(execution)?;
+        Ok(())
+    }
+
+    fn replace_checkpoint(&self, execution: &SuiteExecution) -> Result<(), RunnerError> {
+        let checkpoint = self.validate_checkpoint_directory(execution)?;
+        validate_regular_checkpoint(&checkpoint)?;
+        execution.save_replace(checkpoint)?;
+        Ok(())
+    }
+
+    fn emit_progress(&self, execution: &SuiteExecution, task_id: &str, agent_id: &str) {
+        let Some(callback) = &self.progress else {
+            return;
+        };
+        let Some(cell) = execution
+            .cells
+            .iter()
+            .find(|cell| cell.task_id.as_str() == task_id && cell.agent_id == agent_id)
+        else {
+            return;
+        };
+        let progress = SuiteCellProgress {
+            finished_cells: execution
+                .cells
+                .iter()
+                .filter(|cell| cell.status != SuiteCellStatus::Pending)
+                .count(),
+            total_cells: execution.cells.len(),
+            task_id: cell.task_id.to_string(),
+            agent_id: cell.agent_id.clone(),
+            status: cell.status,
+            group_id: cell.group_id.clone(),
+            error: cell.error.clone(),
+        };
+        callback(&progress);
     }
 
     fn validate_plan_agents(&self, plan: &SuitePlan) -> Result<(), RunnerError> {
@@ -372,6 +509,75 @@ impl SuiteRunner {
             ));
         }
         Ok(())
+    }
+
+    fn validate_plan(&self, plan: &SuitePlan) -> Result<(), RunnerError> {
+        plan.definition.validate()?;
+        if plan.repeat == 0 || plan.repeat > MAX_REPEAT {
+            return Err(RunnerError::Agent(format!(
+                "repeat count must be between 1 and {MAX_REPEAT}"
+            )));
+        }
+        if plan.tasks.len() != plan.definition.tasks.len()
+            || plan
+                .tasks
+                .iter()
+                .zip(&plan.definition.tasks)
+                .any(|(task, expected)| &task.id != expected)
+        {
+            return Err(RunnerError::Agent(
+                "planned tasks do not match the suite definition".to_owned(),
+            ));
+        }
+        for task in &plan.tasks {
+            task.validate()?;
+        }
+        if plan.task_snapshots.len() != plan.tasks.len()
+            || plan
+                .task_snapshots
+                .iter()
+                .zip(&plan.tasks)
+                .any(|(snapshot, task)| snapshot.task_id != task.id)
+        {
+            return Err(RunnerError::Agent(
+                "planned task snapshots do not match task order".to_owned(),
+            ));
+        }
+        self.validate_plan_agents(plan)?;
+        let fingerprint = plan.definition.fingerprint()?;
+        if plan.suite_fingerprint != fingerprint {
+            return Err(RunnerError::Agent(
+                "suite fingerprint changed after preflight".to_owned(),
+            ));
+        }
+        let invocation_count =
+            checked_invocation_count(plan.tasks.len(), plan.agents.len(), plan.repeat)?;
+        if invocation_count != plan.invocation_count {
+            return Err(RunnerError::Agent(
+                "suite invocation count changed after preflight".to_owned(),
+            ));
+        }
+        for task in &plan.tasks {
+            self.validate_shared_basis(plan, &task.id)?;
+        }
+        Ok(())
+    }
+
+    fn validate_checkpoint_directory(
+        &self,
+        execution: &SuiteExecution,
+    ) -> Result<PathBuf, RunnerError> {
+        let directory = suite_run_directory(&self.suite_runs_directory, &execution.suite_run_id)?;
+        let metadata = fs::symlink_metadata(&directory).map_err(|source| RunnerError::Io {
+            operation: "inspect suite-run directory",
+            path: directory.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(RunnerError::UnsafePath(directory.display().to_string()));
+        }
+        ensure_private_contained_directory(self.repository.root(), &directory)?;
+        self.checkpoint_path(execution)
     }
 
     fn validate_shared_basis(
@@ -433,6 +639,44 @@ impl SuiteRunner {
     }
 }
 
+fn checked_invocation_count(
+    task_count: usize,
+    agent_count: usize,
+    repeat: u32,
+) -> Result<u64, RunnerError> {
+    let invocation_count = u64::try_from(task_count)
+        .unwrap_or(u64::MAX)
+        .checked_mul(u64::try_from(agent_count).unwrap_or(u64::MAX))
+        .and_then(|count| count.checked_mul(u64::from(repeat)))
+        .ok_or_else(|| RunnerError::Agent("suite invocation count overflowed".to_owned()))?;
+    if invocation_count > MAX_SUITE_INVOCATIONS {
+        return Err(RunnerError::Agent(format!(
+            "suite plans at most 1,000 agent invocations; requested {invocation_count}"
+        )));
+    }
+    Ok(invocation_count)
+}
+
+fn validate_regular_checkpoint(path: &std::path::Path) -> Result<(), RunnerError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| RunnerError::Io {
+        operation: "inspect suite checkpoint",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RunnerError::UnsafePath(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn portable_agent_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 fn bounded_error(value: &str) -> String {
     const LIMIT: usize = 4096;
     if value.len() <= LIMIT {
@@ -450,7 +694,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -472,6 +717,64 @@ mod tests {
     struct NamedAgent {
         name: String,
         exit_code: i32,
+    }
+
+    #[derive(Debug)]
+    struct FlippingNameAgent {
+        name_calls: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct HeadChangingAgent {
+        repository_root: PathBuf,
+    }
+
+    #[async_trait]
+    impl AgentRunner for FlippingNameAgent {
+        fn name(&self) -> &str {
+            if self.name_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                "alpha"
+            } else {
+                "different"
+            }
+        }
+
+        async fn run(&self, _context: &AgentContext) -> Result<AgentExecution, RunnerError> {
+            Ok(AgentExecution {
+                exit_code: Some(0),
+                timed_out: false,
+                duration: Duration::from_millis(1),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                output_truncated: false,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunner for HeadChangingAgent {
+        fn name(&self) -> &str {
+            "alpha"
+        }
+
+        async fn run(&self, _context: &AgentContext) -> Result<AgentExecution, RunnerError> {
+            git(
+                &self.repository_root,
+                &["commit", "--quiet", "--allow-empty", "-m", "drift"],
+            );
+            Ok(AgentExecution {
+                exit_code: Some(0),
+                timed_out: false,
+                duration: Duration::from_millis(1),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                output_truncated: false,
+            })
+        }
     }
 
     #[async_trait]
@@ -633,6 +936,128 @@ mod tests {
     }
 
     #[test]
+    fn suite_runner_rejects_more_agents_than_the_execution_schema() {
+        let fixture = SuiteFixture::new();
+        let agents = (0..101)
+            .map(|index| named_agent(&format!("agent-{index}"), 0))
+            .collect();
+
+        let result = SuiteRunner::new(
+            fixture.repository.clone(),
+            &fixture.runs,
+            &fixture.groups,
+            &fixture.suite_runs,
+            agents,
+            settings(),
+            "0.3.0",
+        );
+
+        assert!(
+            matches!(result, Err(RunnerError::Agent(message)) if message.contains("at most 100"))
+        );
+    }
+
+    #[test]
+    fn suite_runner_rejects_nonportable_agent_ids_during_construction() {
+        let fixture = SuiteFixture::new();
+        for id in ["Upper Case".to_owned(), "a".repeat(129)] {
+            let result = SuiteRunner::new(
+                fixture.repository.clone(),
+                &fixture.runs,
+                &fixture.groups,
+                &fixture.suite_runs,
+                vec![named_agent(&id, 0)],
+                settings(),
+                "0.3.0",
+            );
+
+            assert!(
+                matches!(result, Err(RunnerError::Agent(message)) if message.contains("1 to 128"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn group_plan_mismatch_aborts_the_persisted_suite_checkpoint() {
+        let fixture = SuiteFixture::new();
+        let runner = fixture.runner(vec![SelectedSuiteAgent {
+            id: "alpha".to_owned(),
+            runner: Arc::new(FlippingNameAgent {
+                name_calls: AtomicUsize::new(0),
+            }),
+        }]);
+        let plan = runner
+            .preflight(&fixture.suite, fixture.tasks.clone(), 1, true)
+            .unwrap();
+
+        assert!(runner.execute(plan).await.is_err());
+        let checkpoint = fs::read_dir(&fixture.suite_runs)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("suite.json");
+        let execution = SuiteExecution::load(checkpoint).unwrap();
+        assert_eq!(execution.status, SuiteExecutionStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_a_plan_mutated_after_preflight_before_creating_artifacts() {
+        let fixture = SuiteFixture::new();
+        let runner = fixture.runner(vec![named_agent("alpha", 0)]);
+        let mut plan = runner
+            .preflight(&fixture.suite, fixture.tasks.clone(), 1, true)
+            .unwrap();
+        plan.repeat = 2;
+
+        let error = runner
+            .execute(plan)
+            .await
+            .expect_err("a changed plan must be revalidated");
+
+        assert!(error.to_string().contains("invocation count"));
+        assert_eq!(fixture.group_count(), 0);
+        assert_eq!(fs::read_dir(&fixture.suite_runs).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn head_change_during_the_last_cell_aborts_its_checkpoint() {
+        let fixture = SuiteFixture::new();
+        let task = fixture.tasks[0].clone();
+        let suite =
+            SuiteDefinition::new(SuiteId::new("single").unwrap(), None, vec![task.id.clone()])
+                .unwrap();
+        let runner = fixture.runner(vec![SelectedSuiteAgent {
+            id: "alpha".to_owned(),
+            runner: Arc::new(HeadChangingAgent {
+                repository_root: fixture.repository.root().to_path_buf(),
+            }),
+        }]);
+        let plan = runner.preflight(&suite, vec![task], 1, true).unwrap();
+
+        let error = runner
+            .execute(plan)
+            .await
+            .expect_err("HEAD drift during the final cell must abort the suite");
+
+        assert!(error.to_string().contains("HEAD changed"));
+        let checkpoint = fs::read_dir(&fixture.suite_runs)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("suite.json");
+        let execution = SuiteExecution::load(checkpoint).unwrap();
+        assert_eq!(execution.status, SuiteExecutionStatus::Aborted);
+        assert_eq!(
+            execution.cells[0].status,
+            patcharena_core::SuiteCellStatus::Pending
+        );
+    }
+
+    #[test]
     fn dry_preflight_creates_no_group_or_suite_artifact() {
         let fixture = SuiteFixture::new();
         let runner = fixture.runner(vec![named_agent("alpha", 0)]);
@@ -665,6 +1090,40 @@ mod tests {
             SuiteExecution::load(outcome.checkpoint_path).unwrap(),
             outcome.execution
         );
+    }
+
+    #[tokio::test]
+    async fn progress_events_are_emitted_after_the_matching_checkpoint_is_durable() {
+        let fixture = SuiteFixture::new();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&observations);
+        let suite_runs = fixture.suite_runs.clone();
+        let runner = fixture
+            .runner(vec![named_agent("alpha", 0)])
+            .with_progress(move |progress| {
+                let checkpoint = fs::read_dir(&suite_runs)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path()
+                    .join("suite.json");
+                let persisted = SuiteExecution::load(checkpoint).unwrap();
+                let persisted_finished = persisted
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.status != patcharena_core::SuiteCellStatus::Pending)
+                    .count();
+                assert_eq!(persisted_finished, progress.finished_cells);
+                observed.lock().unwrap().push(progress.finished_cells);
+            });
+        let plan = runner
+            .preflight(&fixture.suite, fixture.tasks.clone(), 1, true)
+            .unwrap();
+
+        runner.execute(plan).await.unwrap();
+
+        assert_eq!(*observations.lock().unwrap(), vec![1, 2]);
     }
 
     #[tokio::test]
@@ -701,5 +1160,30 @@ mod tests {
             .expect("resume");
         assert_eq!(outcome.execution.status, SuiteExecutionStatus::Completed);
         assert_eq!(fixture.group_count(), 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resume_refuses_a_symlinked_suite_run_directory() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = SuiteFixture::new();
+        let runner = fixture.runner(vec![named_agent("alpha", 0)]);
+        let plan = runner
+            .preflight(&fixture.suite, fixture.tasks.clone(), 1, true)
+            .unwrap();
+        let execution = runner.create_checkpoint(&plan).unwrap();
+        let checkpoint = runner.checkpoint_path(&execution).unwrap();
+        let suite_run_directory = checkpoint.parent().unwrap().to_path_buf();
+        let relocated = fixture.repository.root().join("relocated-suite-run");
+        fs::rename(&suite_run_directory, &relocated).unwrap();
+        symlink(&relocated, &suite_run_directory).unwrap();
+
+        let error = runner
+            .resume(execution, &fixture.suite, fixture.tasks.clone())
+            .await
+            .expect_err("resume must reject a linked checkpoint directory");
+
+        assert!(matches!(error, RunnerError::UnsafePath(_)));
     }
 }

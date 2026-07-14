@@ -183,9 +183,11 @@ agent, repetition, instruction, and total invocation counts without running an a
 cost multiplication. The printed count is a workload estimate, not a currency quote; provider fees,
 token use, rate limits, and network behavior remain external to PatchArena.
 
-Real execution runs the stable task-major, agent-minor matrix sequentially. Every cell produces a
-normal immutable run group, and `.patcharena/suite-runs/<suite-run-id>/suite.json` is atomically
-checkpointed after each cell. `resume` invokes pending cells only and refuses to continue if the
+Real execution prints the validated plan before starting, then runs the stable task-major,
+agent-minor matrix sequentially and prints each cell as soon as its durable checkpoint succeeds.
+Every cell produces a normal immutable run group, and
+`.patcharena/suite-runs/<suite-run-id>/suite.json` is atomically checkpointed after each cell.
+`resume` invokes pending cells only and refuses to continue if the
 repository commit, suite fingerprint, task/effective-policy identities, agent list, repetition or
 instruction condition no longer matches. The generated `report.json`, `report.md`, and `report.html`
 sit beside the checkpoint; `suite report` reconstructs output from those persisted run/group records

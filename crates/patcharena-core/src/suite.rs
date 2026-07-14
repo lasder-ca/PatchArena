@@ -18,9 +18,11 @@ use crate::{
 
 /// The suite-definition schema version supported by this release.
 pub const CURRENT_SUITE_SCHEMA_VERSION: u32 = 1;
+/// Maximum task-agent invocations represented by one suite execution.
+pub const MAX_SUITE_INVOCATIONS: u64 = 1_000;
 
 const MAX_SUITE_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_SUITE_EXECUTION_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SUITE_EXECUTION_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SUITE_DESCRIPTION_BYTES: usize = 1024;
 const MAX_SUITE_TASKS: usize = 100;
 const MAX_SUITE_ERROR_BYTES: usize = 4096;
@@ -569,6 +571,16 @@ impl SuiteExecution {
             .len()
             .checked_mul(self.agents.len())
             .ok_or_else(|| ValidationError::new("cells", "cell count overflowed"))?;
+        let invocation_count = u64::try_from(expected_cells)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(self.repeat));
+        if invocation_count > MAX_SUITE_INVOCATIONS {
+            return Err(ValidationError::new(
+                "cells",
+                "a suite execution must contain at most 1,000 agent invocations",
+            )
+            .into());
+        }
         if self.cells.len() != expected_cells {
             return Err(ValidationError::new(
                 "cells",
@@ -940,6 +952,81 @@ mod tests {
             Utc::now(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn maximum_error_matrix_round_trips_through_the_checkpoint_limit() {
+        let now = Utc::now();
+        let tasks = (0..100)
+            .map(|index| {
+                SuiteTaskSnapshot::new(
+                    TaskId::new(format!("task-{index}")).unwrap(),
+                    BenchmarkIdentity {
+                        repository_commit: "a".repeat(40),
+                        task_fingerprint: format!("{index:064x}"),
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        let agents = (0..10).map(|index| format!("agent-{index}")).collect();
+        let mut execution = SuiteExecution::new(
+            "0.3.0",
+            SuiteId::new("maximum-errors").unwrap(),
+            "b".repeat(64),
+            "a".repeat(40),
+            tasks,
+            agents,
+            1,
+            true,
+            now,
+        )
+        .unwrap();
+        for cell in &mut execution.cells {
+            cell.status = SuiteCellStatus::Error;
+            cell.error = Some("x".repeat(MAX_SUITE_ERROR_BYTES));
+        }
+        execution.status = SuiteExecutionStatus::CompletedWithErrors;
+        execution.completed_at = Some(now);
+        execution.validate().unwrap();
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("suite.json");
+
+        execution.save_new(&path).unwrap();
+        assert_eq!(SuiteExecution::load(path).unwrap(), execution);
+    }
+
+    #[test]
+    fn execution_rejects_more_than_one_thousand_agent_invocations() {
+        let tasks = (0..11)
+            .map(|index| {
+                SuiteTaskSnapshot::new(
+                    TaskId::new(format!("task-{index}")).unwrap(),
+                    BenchmarkIdentity {
+                        repository_commit: "a".repeat(40),
+                        task_fingerprint: format!("{index:064x}"),
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        let agents = (0..10).map(|index| format!("agent-{index}")).collect();
+
+        let result = SuiteExecution::new(
+            "0.3.0",
+            SuiteId::new("too-large").unwrap(),
+            "b".repeat(64),
+            "a".repeat(40),
+            tasks,
+            agents,
+            10,
+            true,
+            Utc::now(),
+        );
+
+        assert!(
+            matches!(result, Err(CoreError::Validation(error)) if error.to_string().contains("1,000"))
+        );
     }
 
     #[test]

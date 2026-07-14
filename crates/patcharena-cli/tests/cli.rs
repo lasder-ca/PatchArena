@@ -5,8 +5,8 @@ use std::{fs, io::Write, path::Path, process::Command as StdCommand};
 use chrono::Utc;
 use patcharena_core::{
     ArtifactPaths, BattleResult, BenchmarkIdentity, CURRENT_RESULT_SCHEMA_VERSION, CommandOutcome,
-    RunGroup, RunResult, SuiteCellStatus, SuiteExecution, SuiteExecutionStatus,
-    TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
+    RunGroup, RunResult, SuiteCellStatus, SuiteExecution, SuiteExecutionStatus, SuiteId,
+    SuiteTaskSnapshot, TaskCommand as CoreTaskCommand, TaskDefinition, TaskId,
 };
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -291,6 +291,9 @@ fn suite_run_builds_a_two_task_two_agent_evidence_matrix() {
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains("base commit:"))
+        .stdout(predicate::str::contains("invocations: 4"))
+        .stdout(predicate::str::contains("cell 1/4:"))
         .stdout(predicate::str::contains("suite run:"))
         .stdout(predicate::str::contains("HTML:"));
 
@@ -363,6 +366,11 @@ fn suite_run_builds_a_two_task_two_agent_evidence_matrix() {
         5
     );
 
+    fs::write(
+        directory.path().join(".patcharena/suites/core.yaml"),
+        "schema_version: 1\nid: core\ndescription: Changed after execution\ntasks:\n  - one\n  - two\n",
+    )
+    .unwrap();
     let export = directory.path().join("suite-export.json");
     binary()
         .current_dir(directory.path())
@@ -382,6 +390,7 @@ fn suite_run_builds_a_two_task_two_agent_evidence_matrix() {
     let exported: patcharena_report::SuiteReport =
         serde_json::from_str(&fs::read_to_string(export).unwrap()).unwrap();
     assert_eq!(exported.cells.len(), 4);
+    assert_eq!(exported.description, None);
 }
 
 #[test]
@@ -617,4 +626,60 @@ fn refuses_metadata_directory_symlink_escape() {
         .stdout(predicate::str::contains(
             ".patcharena writable: prerequisite check failed: refusing non-directory or symlink component",
         ));
+}
+
+#[cfg(unix)]
+#[test]
+fn suite_report_refuses_a_symlinked_suite_run_directory() {
+    use std::os::unix::fs::symlink;
+
+    let directory = repository();
+    init(directory.path());
+    let outside = tempfile::tempdir().expect("outside suite run");
+    let execution = SuiteExecution::new(
+        "0.3.0",
+        SuiteId::new("linked").unwrap(),
+        "b".repeat(64),
+        "a".repeat(40),
+        vec![
+            SuiteTaskSnapshot::new(
+                TaskId::new("one").unwrap(),
+                BenchmarkIdentity {
+                    repository_commit: "a".repeat(40),
+                    task_fingerprint: "c".repeat(64),
+                },
+            )
+            .unwrap(),
+        ],
+        vec!["fake".to_owned()],
+        1,
+        true,
+        Utc::now(),
+    )
+    .unwrap();
+    execution
+        .save_new(outside.path().join("suite.json"))
+        .unwrap();
+    symlink(
+        outside.path(),
+        directory
+            .path()
+            .join(".patcharena/suite-runs")
+            .join(&execution.suite_run_id),
+    )
+    .expect("suite-run directory symlink");
+
+    binary()
+        .current_dir(directory.path())
+        .args([
+            "suite",
+            "report",
+            "--run",
+            &execution.suite_run_id,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("symlink"));
 }

@@ -7,11 +7,13 @@ use patcharena_core::{
     load_suites, suite_checkpoint_path, suite_file_path, suite_run_directory, task_file_path,
 };
 use patcharena_report::{SuiteReport, load_suite_report};
-use patcharena_runner::{AgentRegistry, SelectedSuiteAgent, SuiteExecutionOutcome, SuiteRunner};
+use patcharena_runner::{
+    AgentRegistry, SelectedSuiteAgent, SuiteCellProgress, SuiteExecutionOutcome, SuiteRunner,
+};
 
 use crate::commands::{
     EXIT_BENCHMARK_FAILED, EXIT_SUCCESS, Project, create_contained_directory, load_project,
-    runner_settings, write_generated_file,
+    runner_settings, validate_contained_directory, write_generated_file,
 };
 use crate::{
     CliError, ReportFormat, SuiteAddArgs, SuiteCommand, SuiteReportArgs, SuiteResumeArgs,
@@ -80,8 +82,9 @@ async fn run_suite(arguments: SuiteRunArgs) -> Result<u8, CliError> {
         arguments.repeat.get(),
         !arguments.without_instructions,
     )?;
+    print_plan(&plan);
     if arguments.dry_run {
-        print_plan(&plan);
+        println!("dry run: no run, group, or suite-run records were created");
         return Ok(EXIT_SUCCESS);
     }
     let outcome = runner.execute(plan).await?;
@@ -103,10 +106,10 @@ async fn resume(arguments: SuiteResumeArgs) -> Result<u8, CliError> {
 fn report(arguments: SuiteReportArgs) -> Result<u8, CliError> {
     let project = load_project()?;
     let execution = load_execution(&project, &arguments.run)?;
-    let suite = load_matching_suite(&project, &execution)?;
+    let description = matching_suite_description(&project, &execution);
     let report = load_suite_report(
         execution,
-        suite.description,
+        description,
         &project.paths.runs_dir,
         &project.paths.groups_dir,
     )?;
@@ -140,19 +143,23 @@ fn load_suite(project: &Project, requested_id: &str) -> Result<SuiteDefinition, 
     Ok(suite)
 }
 
-fn load_matching_suite(
-    project: &Project,
-    execution: &SuiteExecution,
-) -> Result<SuiteDefinition, CliError> {
-    let suite = load_suite(project, execution.suite_id.as_str())?;
-    if suite.fingerprint()? != execution.suite_fingerprint {
-        return Err(patcharena_core::CoreError::Validation(ValidationError::new(
-            "suite_fingerprint",
-            "current suite definition differs from the persisted execution",
-        ))
-        .into());
+fn matching_suite_description(project: &Project, execution: &SuiteExecution) -> Option<String> {
+    let path = suite_file_path(&project.paths.suites_dir, &execution.suite_id);
+    match SuiteDefinition::load(path) {
+        Ok(suite)
+            if suite.id == execution.suite_id
+                && suite.fingerprint().ok().as_deref()
+                    == Some(execution.suite_fingerprint.as_str()) =>
+        {
+            suite.description
+        }
+        _ => {
+            eprintln!(
+                "warning: current suite definition is unavailable or differs; report description omitted"
+            );
+            None
+        }
     }
-    Ok(suite)
 }
 
 fn load_suite_tasks(
@@ -225,10 +232,30 @@ fn suite_runner(
         agents,
         runner_settings(&project.config),
         env!("CARGO_PKG_VERSION"),
-    )?)
+    )?
+    .with_progress(print_progress))
+}
+
+fn print_progress(progress: &SuiteCellProgress) {
+    let evidence = progress
+        .group_id
+        .as_deref()
+        .or(progress.error.as_deref())
+        .map_or_else(|| "-".to_owned(), terminal_text);
+    println!(
+        "cell {}/{}: {} / {} -> {} ({})",
+        progress.finished_cells,
+        progress.total_cells,
+        progress.task_id,
+        progress.agent_id,
+        cell_status(progress.status),
+        evidence
+    );
 }
 
 fn load_execution(project: &Project, run_id: &str) -> Result<SuiteExecution, CliError> {
+    let directory = suite_run_directory(&project.paths.suite_runs_dir, run_id)?;
+    validate_contained_directory(&project.paths.repository_root, &directory)?;
     let checkpoint = suite_checkpoint_path(&project.paths.suite_runs_dir, run_id)?;
     let execution = SuiteExecution::load(checkpoint)?;
     if execution.suite_run_id != run_id {
@@ -245,21 +272,24 @@ fn load_execution(project: &Project, run_id: &str) -> Result<SuiteExecution, Cli
 }
 
 fn print_plan(plan: &patcharena_runner::SuitePlan) {
-    println!("suite: {}", plan.definition.id);
-    println!("base commit: {}", plan.repository_commit);
-    println!("tasks: {}", plan.tasks.len());
-    println!("agents: {} ({})", plan.agents.len(), plan.agents.join(", "));
-    println!("repeat: {}", plan.repeat);
+    println!("suite: {}", plan.definition().id);
+    println!("base commit: {}", plan.repository_commit());
+    println!("tasks: {}", plan.tasks().len());
+    println!(
+        "agents: {} ({})",
+        plan.agents().len(),
+        plan.agents().join(", ")
+    );
+    println!("repeat: {}", plan.repeat());
     println!(
         "repository instructions: {}",
-        if plan.instructions_enabled {
+        if plan.instructions_enabled() {
             "enabled"
         } else {
             "hidden"
         }
     );
-    println!("invocations: {}", plan.invocation_count);
-    println!("dry run: no run, group, or suite-run records were created");
+    println!("invocations: {}", plan.invocation_count());
 }
 
 fn finish(

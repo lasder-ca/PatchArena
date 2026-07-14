@@ -7,8 +7,8 @@ use patcharena_core::{SuiteCellStatus, SuiteExecution, SuiteExecutionStatus, Sui
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    GroupReport, MetricStats, ReportError, escape_html, escape_markdown, load_selection,
-    validate_completed_group,
+    GroupReport, MetricStats, ReportError, escape_html, escape_markdown, load_selected_group,
+    load_selection, validate_completed_group,
 };
 
 /// One task-and-agent cell in a benchmark suite report.
@@ -22,6 +22,9 @@ pub struct SuiteMatrixCell {
     pub status: SuiteCellStatus,
     /// Immutable run-group UUID when the cell completed.
     pub group_id: Option<String>,
+    /// Immutable member run UUIDs when the cell completed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_ids: Vec<String>,
     /// Successful observed runs; zero when no group evidence exists.
     pub successful_runs: usize,
     /// Runs requested for this cell.
@@ -155,6 +158,7 @@ impl SuiteReport {
                     agent_id: cell.agent_id.clone(),
                     status: cell.status,
                     group_id: None,
+                    run_ids: Vec::new(),
                     successful_runs: 0,
                     requested_runs,
                     success_rate: None,
@@ -302,7 +306,15 @@ impl SuiteReport {
                         .as_ref()
                         .map_or_else(|| "—".to_owned(), |error| escape_markdown(error))
                 },
-                |group_id| format!("`{}`", escape_markdown(group_id)),
+                |group_id| {
+                    let runs = cell
+                        .run_ids
+                        .iter()
+                        .map(|run_id| format!("`{}`", escape_markdown(run_id)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("group `{}`; runs {runs}", escape_markdown(group_id))
+                },
             );
             output.push_str(&format!(
                 "| {} | {} | {} | {}/{} | {} | {} | {} | {} | {} | {} | {} |\n",
@@ -374,7 +386,18 @@ impl SuiteReport {
                         .as_ref()
                         .map_or_else(|| "—".to_owned(), |error| escape_html(error))
                 },
-                |group_id| format!("<code>{}</code>", escape_html(group_id)),
+                |group_id| {
+                    let runs = cell
+                        .run_ids
+                        .iter()
+                        .map(|run_id| format!("<code>{}</code>", escape_html(run_id)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "group <code>{}</code><br>runs {runs}",
+                        escape_html(group_id)
+                    )
+                },
             );
             detail_rows.push_str(&format!(
                 "<tr><th>{}</th><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"evidence\">{}</td></tr>",
@@ -420,6 +443,8 @@ pub fn load_suite_report(
     groups_directory: impl AsRef<Path>,
 ) -> Result<SuiteReport, ReportError> {
     execution.validate()?;
+    let runs_directory = runs_directory.as_ref();
+    let groups_directory = groups_directory.as_ref();
     let mut groups = Vec::new();
     for cell in &execution.cells {
         if cell.status == SuiteCellStatus::Completed {
@@ -429,11 +454,13 @@ pub fn load_suite_report(
                     cell.task_id, cell.agent_id
                 ))
             })?;
-            groups.push(load_selection(
-                runs_directory.as_ref(),
-                groups_directory.as_ref(),
-                group_id,
-            )?);
+            if load_selected_group(groups_directory, group_id)?.is_none() {
+                return Err(ReportError::NotFound(format!(
+                    "group `{group_id}` for suite cell `{}` / `{}`",
+                    cell.task_id, cell.agent_id
+                )));
+            }
+            groups.push(load_selection(runs_directory, groups_directory, group_id)?);
         }
     }
     let mut report = SuiteReport::new(execution, groups)?;
@@ -533,6 +560,7 @@ fn completed_matrix_cell(group: GroupReport) -> SuiteMatrixCell {
         agent_id: group.agent,
         status: SuiteCellStatus::Completed,
         group_id: Some(group.group_id),
+        run_ids: group.runs.iter().map(|run| run.run_id.clone()).collect(),
         successful_runs: group.runs.iter().filter(|run| run.success).count(),
         requested_runs: group.run_count,
         success_rate: Some(group.success_rate),
@@ -795,6 +823,7 @@ mod tests {
         let report = SuiteReport::new(execution, groups).expect("suite report");
 
         assert_eq!(report.cells.len(), 4);
+        assert_eq!(report.cells[0].run_ids.len(), 2);
         assert_eq!(report.agent("alpha").unwrap().macro_success_rate, Some(0.5));
         assert_eq!(report.agent("beta").unwrap().macro_success_rate, Some(0.75));
         assert!(!report.to_markdown().contains("winner"));
@@ -924,7 +953,7 @@ mod tests {
         execution.mark_finished(now).unwrap();
 
         let report = load_suite_report(
-            execution,
+            execution.clone(),
             Some("Persisted evidence".to_owned()),
             &runs,
             &groups,
@@ -935,6 +964,20 @@ mod tests {
         assert_eq!(
             report.cells[0].group_id.as_deref(),
             Some(group.group_id.as_str())
+        );
+
+        fs::remove_file(groups.join(format!("{}.json", group.group_id))).unwrap();
+        let mut singleton_impostor = result;
+        singleton_impostor.run_id = group.group_id.clone();
+        singleton_impostor.group_id = None;
+        let impostor_directory = runs.join(&group.group_id);
+        fs::create_dir(&impostor_directory).unwrap();
+        singleton_impostor
+            .save_new(impostor_directory.join("result.json"))
+            .unwrap();
+        assert!(
+            load_suite_report(execution, None, &runs, &groups).is_err(),
+            "a suite cell must resolve to group metadata, never a singleton run with the same UUID"
         );
     }
 }

@@ -525,7 +525,7 @@ pub(crate) fn create_contained_directory(root: &Path, target: &Path) -> Result<(
     walk_contained_directory(root, target, true)
 }
 
-fn validate_contained_directory(root: &Path, target: &Path) -> Result<(), CliError> {
+pub(crate) fn validate_contained_directory(root: &Path, target: &Path) -> Result<(), CliError> {
     walk_contained_directory(root, target, false)
 }
 

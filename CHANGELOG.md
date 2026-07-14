@@ -17,6 +17,7 @@ version is tagged.
   task-by-agent Cartesian workflow.
 - Atomic per-cell suite checkpoints, pending-only resume, and automatic JSON, Markdown, and
   self-contained HTML matrix reports derived from persisted run/group evidence.
+- Pre-execution plan output and live per-cell progress emitted only after durable checkpoint writes.
 - Coverage and equal-task-weight agent summaries that keep pending and orchestration-error metrics
   absent and deliberately make no winner or statistical-significance claim.
 
@@ -33,9 +34,11 @@ version is tagged.
   available explicit agents, rejects duplicates, limits definitions to 100 tasks, and caps a plan
   at 1,000 agent invocations.
 - Resume refuses changes to the suite fingerprint, repository commit, task identities, agent order,
-  repetition, or instruction condition; completed cells are never rerun.
+  repetition, or instruction condition; identities are rechecked after every group, and completed
+  cells are never rerun.
+- Suite-run child-directory links are rejected before reads and checkpoint replacements.
 - Suite reports reject missing, duplicate, unreferenced, or incompatible group evidence and
-  revalidate aggregates against persisted run details.
+  revalidate aggregates against persisted run details while retaining direct group and run IDs.
 - Suites retain the existing security boundary: detached worktrees, direct argv construction,
   limits, and audits are defense in depth, not a filesystem, process, network, or cost sandbox.
 

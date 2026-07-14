@@ -24,7 +24,8 @@ pub use orchestration::{
 pub use process::{ProcessOutput, ProcessRequest, execute_process, parse_command};
 pub use registry::AgentRegistry;
 pub use suite::{
-    MAX_SUITE_INVOCATIONS, SelectedSuiteAgent, SuiteExecutionOutcome, SuitePlan, SuiteRunner,
+    MAX_SUITE_INVOCATIONS, SelectedSuiteAgent, SuiteCellProgress, SuiteExecutionOutcome, SuitePlan,
+    SuiteRunner,
 };
 
 /// Errors produced while running an agent or benchmark command.
