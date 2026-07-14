@@ -417,15 +417,15 @@ impl SuiteRunner {
                 Arc::clone(&agent.runner),
                 self.settings.clone(),
             )?;
-            match arena
+            let attempt = arena
                 .run_group(task, plan.repeat, plan.instructions_enabled)
-                .await
-            {
+                .await;
+            if let Err(error) = self.validate_shared_basis(plan, &cell.task_id) {
+                self.abort_checkpoint(&mut execution)?;
+                return Err(error);
+            }
+            match attempt {
                 Ok(group) => {
-                    if let Err(error) = self.validate_shared_basis(plan, &cell.task_id) {
-                        self.abort_checkpoint(&mut execution)?;
-                        return Err(error);
-                    }
                     if let Err(error) = self.validate_group(&group.group, plan, task, &agent.id) {
                         self.abort_checkpoint(&mut execution)?;
                         return Err(error);
@@ -727,6 +727,7 @@ mod tests {
     #[derive(Debug)]
     struct HeadChangingAgent {
         repository_root: PathBuf,
+        fail_after_change: bool,
     }
 
     #[async_trait]
@@ -759,11 +760,17 @@ mod tests {
             "alpha"
         }
 
-        async fn run(&self, _context: &AgentContext) -> Result<AgentExecution, RunnerError> {
+        async fn run(&self, context: &AgentContext) -> Result<AgentExecution, RunnerError> {
             git(
                 &self.repository_root,
                 &["commit", "--quiet", "--allow-empty", "-m", "drift"],
             );
+            if self.fail_after_change {
+                fs::remove_dir_all(&context.result_dir).unwrap();
+                return Err(RunnerError::Agent(
+                    "intentional failure after HEAD drift".to_owned(),
+                ));
+            }
             Ok(AgentExecution {
                 exit_code: Some(0),
                 timed_out: false,
@@ -1032,6 +1039,7 @@ mod tests {
             id: "alpha".to_owned(),
             runner: Arc::new(HeadChangingAgent {
                 repository_root: fixture.repository.root().to_path_buf(),
+                fail_after_change: false,
             }),
         }]);
         let plan = runner.preflight(&suite, vec![task], 1, true).unwrap();
@@ -1040,6 +1048,46 @@ mod tests {
             .execute(plan)
             .await
             .expect_err("HEAD drift during the final cell must abort the suite");
+
+        assert!(error.to_string().contains("HEAD changed"));
+        let checkpoint = fs::read_dir(&fixture.suite_runs)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("suite.json");
+        let execution = SuiteExecution::load(checkpoint).unwrap();
+        assert_eq!(execution.status, SuiteExecutionStatus::Aborted);
+        assert_eq!(
+            execution.cells[0].status,
+            patcharena_core::SuiteCellStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn head_change_during_a_failed_last_cell_still_aborts_its_checkpoint() {
+        let fixture = SuiteFixture::new();
+        let task = fixture.tasks[0].clone();
+        let suite = SuiteDefinition::new(
+            SuiteId::new("single-failure").unwrap(),
+            None,
+            vec![task.id.clone()],
+        )
+        .unwrap();
+        let runner = fixture.runner(vec![SelectedSuiteAgent {
+            id: "alpha".to_owned(),
+            runner: Arc::new(HeadChangingAgent {
+                repository_root: fixture.repository.root().to_path_buf(),
+                fail_after_change: true,
+            }),
+        }]);
+        let plan = runner.preflight(&suite, vec![task], 1, true).unwrap();
+
+        let error = runner
+            .execute(plan)
+            .await
+            .expect_err("HEAD drift must win over the local attempt error");
 
         assert!(error.to_string().contains("HEAD changed"));
         let checkpoint = fs::read_dir(&fixture.suite_runs)

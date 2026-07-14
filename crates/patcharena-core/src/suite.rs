@@ -22,7 +22,7 @@ pub const CURRENT_SUITE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_SUITE_INVOCATIONS: u64 = 1_000;
 
 const MAX_SUITE_FILE_BYTES: u64 = 1024 * 1024;
-const MAX_SUITE_EXECUTION_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SUITE_EXECUTION_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SUITE_DESCRIPTION_BYTES: usize = 1024;
 const MAX_SUITE_TASKS: usize = 100;
 const MAX_SUITE_ERROR_BYTES: usize = 4096;
@@ -959,8 +959,10 @@ mod tests {
         let now = Utc::now();
         let tasks = (0..100)
             .map(|index| {
+                let suffix = format!("{index:03}");
                 SuiteTaskSnapshot::new(
-                    TaskId::new(format!("task-{index}")).unwrap(),
+                    TaskId::new(format!("t{suffix}{}", "t".repeat(128 - 1 - suffix.len())))
+                        .unwrap(),
                     BenchmarkIdentity {
                         repository_commit: "a".repeat(40),
                         task_fingerprint: format!("{index:064x}"),
@@ -969,10 +971,15 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let agents = (0..10).map(|index| format!("agent-{index}")).collect();
+        let agents = (0..10)
+            .map(|index| {
+                let suffix = index.to_string();
+                format!("a{suffix}{}", "a".repeat(128 - 1 - suffix.len()))
+            })
+            .collect();
         let mut execution = SuiteExecution::new(
-            "0.3.0",
-            SuiteId::new("maximum-errors").unwrap(),
+            "\"".repeat(128),
+            SuiteId::new("s".repeat(128)).unwrap(),
             "b".repeat(64),
             "a".repeat(40),
             tasks,
@@ -984,7 +991,7 @@ mod tests {
         .unwrap();
         for cell in &mut execution.cells {
             cell.status = SuiteCellStatus::Error;
-            cell.error = Some("x".repeat(MAX_SUITE_ERROR_BYTES));
+            cell.error = Some("\"".repeat(MAX_SUITE_ERROR_BYTES));
         }
         execution.status = SuiteExecutionStatus::CompletedWithErrors;
         execution.completed_at = Some(now);
