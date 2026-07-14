@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod suite;
+
+pub use suite::{SuiteAgentSummary, SuiteMatrixCell, SuiteReport, load_suite_report};
+
 use std::{
     collections::HashSet,
     fs,
