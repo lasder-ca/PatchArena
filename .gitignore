@@ -1,5 +1,6 @@
 /target/
 /work/
+/.worktrees/
 /fixtures/broken-rust-project/target/
 /.patcharena/runs/
 /.patcharena/groups/
