@@ -4,85 +4,70 @@
 
 [English](README.md) | **日本語**
 
-PatchArenaは、実際のリポジトリ上でAIコーディングエージェントを再現可能に評価するベンチマークランナーです。
+PatchArenaは、実際のGitリポジトリ上でAIコーディングエージェントを繰り返し実行し、その結果を比較するベンチマークランナーです。
 
-バージョン管理された修正タスクを新しいGit worktreeで実行し、エージェントの挙動を記録して、検証結果を機械可読な証拠として保存します。同じタスクを複数回実行することで、単発の成功例だけではなく、成功率、実行時間、パッチ規模、検証失敗、ポリシー違反、実行間のばらつきを比較できます。
+各試行は同じコミットから作成した新しいGit worktreeで始まり、準備処理、エージェント、検証処理の順に実行されます。変更差分、標準出力、標準エラー、検証結果、禁止操作の検出結果を保存するため、成功した一件だけではなく、成功率、実行時間、変更規模、失敗内容、試行ごとのばらつきを確認できます。
 
-**現在のリリース:** v0.3.0（ソースからインストール）。crates.ioパッケージはまだありません。CLIとRust APIはSemantic Versioningに従い、保存形式は独立したschema versionで管理します。既存のschema-1 run証拠は引き続き読み込めます。
-
-[クイックスタート](#クイックスタート) · [Suite](#benchmark-suite) · [タスク形式](#タスク定義) · [レポート](#htmlレポートの例) · [セキュリティ](#セキュリティ) · [コントリビューション](CONTRIBUTING.md)
+**現在のリリース:** v0.3.0。ソースからインストールします。crates.ioではまだ公開していません。CLIとRust APIはSemantic Versioningに従い、保存形式は独立したスキーマversionで管理します。
 
 > [!WARNING]
-> PatchArenaは完全なsandboxではありません。エージェント、setup、verifyの各プログラムは、PatchArenaプロセスと同じOS権限で動作します。信頼できない入力を扱う前に、[セキュリティ](#セキュリティ)と[脅威モデル](docs/threat-model.md)を確認してください。
+> PatchArenaはサンドボックスではありません。エージェント、準備処理、検証処理は、PatchArenaと同じOS権限で動きます。信頼できない入力を扱う前に、[セキュリティ](#セキュリティ)と[脅威モデル](docs/threat-model.md)を確認してください。
 
 ## PatchArenaを使う理由
 
-エージェントのデモでは、成功した1件のパッチだけが示され、失敗した試行、実行環境、検証出力、正確なリポジトリrevisionが省略されることがあります。PatchArenaは、それらの入力と結果を明示します。ローカル実験、エージェント評価、回帰試験、リポジトリ指示あり・なしの比較など、証拠を後から確認できる必要がある用途を想定しています。
+エージェントの紹介では、成功した差分だけが示され、失敗した試行、実行環境、検証出力、正確なリポジトリのコミットが省略されることがあります。PatchArenaは、タスク、基準コミット、実行条件、差分、ログ、検証結果を一緒に残し、あとから確認できる形にします。
 
-PatchArenaは、モデルの総合ランキング、統計的有意性、信頼できないコードの安全性を保証しません。再現可能な実行制御と証拠収集を提供しますが、実験設計とホスト隔離は利用者の責任です。
+想定している用途:
 
-## 動作の流れ
+- 同じ修正タスクを複数回実行し、成功率とばらつきを調べる。
+- 複数のエージェントを同じタスクと検証条件で比較する。
+- `AGENTS.md`などのリポジトリ指示がある場合と、隠した場合を比較する。
+- 以前は通っていたタスクを再実行し、エージェントや設定の変更による回帰を確認する。
+
+PatchArenaは、モデルの総合順位、統計的有意性、信頼できないコードの安全性を保証しません。タスク設計、検証内容、反復数、ホストの隔離は利用者が決める必要があります。
+
+## 実行の流れ
 
 ```text
-バージョン管理されたタスク + commit済みHEAD + 有効ポリシー
+バージョン管理されたタスク + 固定したHEAD + 有効なポリシー
                               │
                               ▼
-                反復ごとのdetached worktree
+                  試行ごとのdetached worktree
                               │
-                 setup → agent → verify
+                  setup → agent → verify
                               │
                               ▼
-             diff + logs + audit + result.json
+               diff + logs + audit + result.json
                               │
                        compare / report
 ```
 
-各反復は同じ固定commitから開始します。PatchArenaは暗黙のshellを使わずにコマンドを実行し、上限付きの証拠を記録し、一時worktreeを削除して、各runをUUID配下へ保存します。run groupには要求したサンプル数と完了状態が記録されます。
+すべての試行は同じコミットから始まります。コマンドは暗黙のシェルを使わず、実行ファイルと引数の配列として起動。出力には上限を設け、終了後に一時worktreeを削除します。
 
-## 現在の対応範囲
+## 主な機能
 
-初期バージョンでは次のコマンドを提供します。
+- `patcharena init` — リポジトリ内の設定と保存先を作成。
+- `patcharena task add/list` — YAML形式のタスクを作成・一覧表示。
+- `patcharena doctor` — Git、Rust、worktree、書き込み権限を確認。
+- `patcharena agent list/doctor` — エージェントCLIの検出と診断。
+- `patcharena run` — 一つのタスクを指定回数実行。
+- `patcharena battle` — 同じコミットから複数エージェントを順番に実行。
+- `patcharena suite add/list/run/resume/report` — 複数タスクと複数エージェントの組み合わせを管理。
+- `patcharena compare` — 保存済みの実行グループを比較。
+- `patcharena report` — Markdown、JSON、単体HTMLのレポートを生成。
 
-- `patcharena init` — 既存ファイルを上書きせず、リポジトリローカルの設定と状態を作成
-- `patcharena task add` / `patcharena task list` — YAMLタスクの作成と一覧表示
-- `patcharena doctor` — 共通のproject前提条件を確認
-- `patcharena agent list` / `patcharena agent doctor <id>` — adapterの検出と診断
-- `patcharena suite add/list/run/resume/report` — review可能な複数タスクsuiteの定義、費用規模の事前確認、checkpoint実行、task-by-agentレポート
-- `patcharena run` — 選択したagentでタスクを実行して証拠を保存
-- `patcharena battle` — 同じcommitから複数agentを順番に実行
-- `patcharena compare` — 保存済みrun groupを比較
-- `patcharena report` — Markdown、JSON、単一HTMLレポートを生成
-
-組み込みadapterはCodex CLI、Claude Code、Gemini CLIに対応します。shellを介さないcustom agentもproject単位で設定できます。実行時に必要なのは選択したCLIだけです。
-
-## 記録する内容
-
-各runでは次の情報を記録できます。
-
-- 成否とコマンド終了ステータス
-- 開始・終了時刻と経過時間
-- 変更ファイル数、追加行数、削除行数
-- setupとverifyの結果
-- 上限付きstdout / stderr
-- 生成されたGit patch
-- 禁止コマンド・禁止パス違反
-- タスク、エージェント、結果schema version
-- 正確な`HEAD` commitとタスク／有効ポリシーfingerprintを含むbenchmark identity
-
-反復結果を集約すると、成功率、実行時間中央値、ばらつきを確認できます。通常実行と`--without-instructions`実行を分けることで、他の入力を利用者が管理している前提のもと、`AGENTS.md`などのリポジトリ指示あり・なしを比較できます。
+組み込みアダプターはCodex CLI、Claude Code、Gemini CLIに対応しています。シェルを介さない独自エージェントも、リポジトリ単位で設定できます。
 
 ## 必要環境
 
-- LinuxまたはWSL2（主な対応環境）
-- Git
-- Rust **1.85.0**以上（MSRV、Rust 2024 edition）
-- 本番runではCodex CLI、Claude Code、Gemini CLI、または設定済みcustom executableのいずれか
+- LinuxまたはWSL2。
+- Git。
+- Rust 1.85.0以降。
+- 実際のベンチマークでは、Codex CLI、Claude Code、Gemini CLI、または設定済みの独自実行ファイル。
 
-PatchArena自体のbuildとtestにはCodex CLIは不要です。
+PatchArena本体のビルドとテストに、各エージェントCLIは不要です。
 
 ## インストール
-
-現在はソースcheckoutからインストールします。
 
 ```bash
 ./prepare.sh
@@ -90,24 +75,18 @@ cargo install --path crates/patcharena-cli --locked
 patcharena --help
 ```
 
-`prepare.sh`は前提コマンドを確認し、依存取得、build、test、lintを実行します。`sudo`、パッケージの自動インストール、ユーザーのGit設定変更は行いません。開発中はインストールせず、`cargo run -p patcharena-cli -- <arguments>`でも実行できます。
-
-ソース版を更新する場合は、利用したいrevisionをpullまたはdownloadし、変更内容と検証結果を確認してから次を実行します。
-
-```bash
-cargo install --path crates/patcharena-cli --locked --force
-```
+`prepare.sh`は前提コマンドを確認し、依存関係の取得、ビルド、テスト、静的検査を実行します。`sudo`、パッケージの自動インストール、ユーザーのGit設定変更は行いません。
 
 ## クイックスタート
 
-評価対象のGitリポジトリ内で実行します。
+評価したいGitリポジトリ内で実行します。
 
 ```bash
 patcharena init
 patcharena doctor
 
 printf '%s\n' \
-  'CSV exporterが各recordの末尾に改行を1つだけ出力するよう修正してください。' \
+  'CSV出力時に各recordの末尾へ改行を1つだけ出力してください。' \
   > prompt.md
 
 patcharena task add \
@@ -115,64 +94,14 @@ patcharena task add \
   --prompt-file prompt.md \
   --verify "cargo test csv_export"
 
-patcharena task list
 patcharena agent list
 patcharena agent doctor codex
 patcharena run --task csv-newline-regression --agent codex --repeat 3
 ```
 
-`run`はgroup UUIDを表示します。`compare`や対象指定`report`で使うため保存してください。生成データは`.patcharena/`配下へ保存されます。タスクYAMLはversion管理できますが、run artifactは通常ローカルのままにします。
-
-リポジトリ内の`AGENTS.md`をエージェントから一時的に隠した比較groupを作るには、`--without-instructions`を追加します。setup後にworktreeを走査し、追跡外・ignore対象を含む通常ファイルの`AGENTS.md`を隠し、verify前に復元します。symlink directoryは追跡せず、走査は100,000 entryまでです。上限超過や`AGENTS.md` symlinkを検出した場合は、不完全な状態で続行せずrunを失敗させます。
-
-このオプションはcontextが完全にないエージェントを作るものではありません。worktree外の指示、別名の指示ファイル、ユーザー／グローバル設定、エージェント既定値、モデル側context、setupプログラムが既に観測した入力は隠しません。
-
-`init`は何度実行しても既存の有効な`patcharena.toml`を保持し、安全なmetadata directoryを再利用します。taskとsuiteの定義はbenchmark入力としてversion管理し、生成されたrun、group、battle、comparison、suite-run、report artifactと秘密情報はversion管理しないでください。
-
-## コマンド一覧
-
-| コマンド | 用途 |
-|---|---|
-| `patcharena init` | リポジトリローカルの設定と状態directoryを作成 |
-| `patcharena task add` | prompt fileとコマンドから検証済みタスクを作成 |
-| `patcharena task list` | タスクIDと制限値を一覧表示 |
-| `patcharena agent list` | 組み込み／custom agent、利用可否、CLI versionを一覧表示 |
-| `patcharena agent doctor <id>` | credentialを表示せず1 adapterを診断 |
-| `patcharena suite add/list/run/resume/report` | checkpoint付きtask-by-agent benchmark matrixを定義・実行 |
-| `patcharena run` | 1回以上の隔離された反復を実行 |
-| `patcharena battle` | 1つのtaskとbase commitで複数agentを順番に実行 |
-| `patcharena compare` | 互換性のある完了groupまたは個別runを比較 |
-| `patcharena report` | Markdown、JSON、単一HTMLを生成 |
-| `patcharena doctor` | 共通のGit、Rust、worktree、書き込み可能性を確認 |
-
-正確なoption一覧は`patcharena <command> --help`で確認できます。安定したerror categoryの終了コードは、入力またはローカルI/Oが`3`、Gitまたは前提条件が`4`、runner失敗が`5`、失敗runを含む完了benchmarkが`6`、reportまたはcomparison失敗が`7`です。引数parse errorにはClapの標準終了コードを使います。
-
-## Benchmark suite
-
-suiteは、version管理できる順序付きtask ID一覧です。ローカルでの一連の流れは次のとおりです。
-
-```bash
-patcharena suite add --id core --task task-a --task task-b
-git add .patcharena/tasks .patcharena/suites patcharena.toml
-git commit -m "Add PatchArena benchmark suite"
-
-patcharena suite run --suite core --agents codex,claude --repeat 3 --dry-run
-patcharena suite run --suite core --agents codex,claude --repeat 3
-patcharena suite resume --run <suite-run-id>
-patcharena suite report --run <suite-run-id> --format html --output report.html
-```
-
-agentは常に明示指定します。suite-run recordを作る前に、重複・未知のID・version probeが利用できないCLIを拒否します。`--dry-run`はsuite、task、有効policy、agent、追跡対象fileのclean状態、固定`HEAD`を検証し、task数、agent数、反復数、instructions条件、総invocation数だけを表示してagentを起動しません。総作業量は`tasks × agents × repeat`で、誤操作による費用増幅を見える化して抑えるため1,000 invocation（taskは100件）を上限にします。この件数は作業量の目安であり金額見積りではありません。provider料金、token使用量、rate limit、network動作はPatchArenaの管理外です。
-
-本実行は検証済みplanを開始前に表示し、task-major、agent-minorの固定matrixを順番に処理します。各cellは通常のimmutable run groupを生成し、`.patcharena/suite-runs/<suite-run-id>/suite.json`へのatomic checkpointが成功した時点で進捗を表示します。`resume`はpending cellだけを実行し、repository commit、suite fingerprint、task／有効policy identity、agent一覧、反復数、instructions条件が変わっていれば再開を拒否します。`report.json`、`report.md`、`report.html`はcheckpointと同じdirectoryへ生成されます。`suite report`は保存済みrun/group証拠だけから再構築し、agentやverify commandを再実行しません。
-
-レポートはcoverage、agent別summary、task-by-agent matrixを表示します。task-macro成功率では、完了した各task cellを同じ重みで扱います。pendingまたはorchestration errorのcellは、0という架空値ではなくmetric欠測のままです。PatchArenaはwinnerや統計的有意性を宣言しません。反復数、taskの代表性、prompt、setup、verify品質、toolchain、model、credential、外部serviceは利用者の実験設計です。suite結果を信頼する前に、すべてのtaskとverifierをreviewしてください。
-
-suiteも単独runと同じdirect argv、出力上限、worktree、証拠保全を使いますが、実行数の増加は費用と露出を同時に増やします。これは依然として**サンドボックスではありません**。信頼できないrepository、task、agentにはOSで強制する隔離とcleanなcredential環境を使ってください。
+実行結果は`.patcharena/`へ保存されます。タスクとスイートの定義はGitで管理できますが、ログ、差分、実行結果、秘密情報を含む可能性がある生成物は通常コミットしません。
 
 ## タスク定義
-
-タスクは`.patcharena/tasks/<id>.yaml`へ保存します。setup、verify、resource／patch規模制限、禁止操作を定義できます。
 
 ```yaml
 id: csv-newline-regression
@@ -203,37 +132,41 @@ forbidden:
     - .env
 ```
 
-コマンド文字列は実行ファイルと引数配列へ分割されます。pipe、redirect、変数展開などのshell operatorは評価しません。`sh -c`などのshellを明示的に起動した場合、そのparseとriskはshell側へ委譲されます。
+コマンド文字列は、実行ファイルと引数へ分割されます。パイプ、リダイレクト、変数展開などのシェル構文は評価しません。`sh -c`のようにシェルを明示した場合は、その解析と危険性をシェル側へ委ねます。
 
-機械生成タスクではtokenizeを避けた構造化形式も利用できます。
+## 記録する内容
 
-```yaml
-verify:
-  commands:
-    - program: cargo
-      args: ["test", "csv_export"]
+各試行にはUUIDが割り当てられ、次の情報を保存します。
+
+- 成否と終了ステータス。
+- 開始時刻、終了時刻、経過時間。
+- 変更ファイル数、追加行数、削除行数。
+- 準備処理と検証処理の結果。
+- 上限付きの標準出力と標準エラー。
+- Git差分。
+- 禁止コマンド・禁止パスの検出結果。
+- タスク、エージェント、結果形式のversion。
+- 正確な`HEAD`と、タスク・有効ポリシーから計算した比較用識別子。
+
+ログ、監査記録、差分は、そのまま公開できるように無害化されたデータではありません。共有前に秘密情報が含まれていないか確認してください。
+
+## スイート
+
+スイートは、複数のタスクとエージェントをまとめて実行するための定義です。
+
+```bash
+patcharena suite add --id core --task task-a --task task-b
+patcharena suite run --suite core --agents codex,claude --repeat 3 --dry-run
+patcharena suite run --suite core --agents codex,claude --repeat 3
+patcharena suite resume --run <suite-run-id>
+patcharena suite report --run <suite-run-id> --format html --output report.html
 ```
 
-リポジトリ既定値は[`patcharena.toml.example`](patcharena.toml.example)に記載しています。数値の既定値は実行時の安全上限でもあり、タスクは制限を厳しくできますが緩和できません。実効値はタスク値とproject値の小さい方です。timeoutと出力上限は各setup、agent、verify processへ個別に適用され、変更ファイル数とdiff行数は最終patchへ適用されます。実効ポリシーが変わるとbenchmark fingerprintも変わります。
+`--dry-run`はエージェントを起動せず、タスク数、エージェント数、反復数、指示の有無、合計実行回数を表示します。合計作業量は`tasks × agents × repeat`で、誤操作による費用の増加を抑えるため1,000回を上限にしています。この値は金額の見積もりではありません。
 
-## 結果
+## 比較とレポート
 
-各反復にはUUIDが割り当てられます。group metadataは要求反復数と`running`、`completed`、`aborted`状態を記録し、最初の反復前に作成され、完了した反復ごとにatomic更新されます。突然のhost crashで`running`のまま残ったgroupは、成功扱いされません。
-
-```text
-.patcharena/runs/<run-id>/
-├── result.json
-├── stdout.log
-├── stderr.log
-├── changes.diff
-└── audit.jsonl
-```
-
-`result.json`では`schema_version`が必須です。benchmark identityは、結果集合を比較可能か判断するために使います。JSON Lines形式のaudit artifactには、各phaseで起動したコマンドの証拠が記録されます。log、audit、patchはsanitize済み公開物ではありません。共有前に秘密情報を確認してください。
-
-## runの比較
-
-エージェントを再実行せず、保存済みgroup IDを比較します。
+保存済みの実行グループは、エージェントを再実行せずに比較できます。
 
 ```bash
 patcharena compare \
@@ -242,15 +175,9 @@ patcharena compare \
   --output comparison.json
 ```
 
-1 sampleとしてrun IDも指定できますが、通常はgroup IDを使います。両方が完了済みで、観測run数と要求run数が一致し、task ID、benchmark identity、sample sizeが同じ場合のみ比較できます。完了metadataのないlegacy groupやidentityのない不正recordは比較しません。
+比較できるのは、完了済みで、要求した試行数と実際の試行数が一致し、タスク、基準コミット、有効ポリシー、試行数が互換なグループだけです。
 
-identityは正確なrepository `HEAD`と、タスク定義・解決済み実行ポリシーのSHA-256 fingerprintを組み合わせます。比較対象にできるよう、選択したagentとinstructions on/off条件は意図的に含めません。これは互換性guardであり、署名済みattestationや完全な環境固定ではありません。toolchain、依存、agent/model設定、credential、network responseなどは利用者が管理する必要があります。
-
-比較結果には成功率、実行時間中央値、変更ファイル数、diff行数、verify失敗、禁止操作検出、反復間のばらつきが含まれます。
-
-## HTMLレポートの例
-
-外部CDNを使わない、screenshot向けの単一HTMLを生成できます。
+外部CDNを使わない単体HTMLレポートも生成できます。
 
 ```bash
 patcharena report \
@@ -259,94 +186,25 @@ patcharena report \
   --output patcharena-report.html
 ```
 
-レポートにはtask、agent、完了状態、要求／観測反復数、成功率、実行時間、patch規模、verify詳細、error、policy違反、runごとの証拠が表示されます。`running`、`aborted`、legacy groupも確認できますが、比較対象にはできません。READMEには実在しないbenchmark値を掲載していません。
-
-```bash
-patcharena report --format json --output patcharena-report.json
-patcharena report --format markdown --output patcharena-report.md
-```
-
-## 対応エージェント
-
-`codex`、`claude`、`gemini`を組み込みで提供します。`patcharena agent list`は、任意CLIが未導入でもproject全体を失敗させず、commandの有無と検出versionを表示します。組み込み／custom adapterは、それぞれ実行ファイル検出、argv生成、出力処理、metadataを担当します。agent起動にshellは使いません。
-
-## Custom Agent設定
-
-`patcharena.toml`へproject-local adapterを追加できます。
-
-```toml
-[agents.my-agent]
-type = "custom"
-command = "./bin/my-agent"
-args = ["--prompt-file", "{prompt_file}", "--workspace", "{workspace}"]
-timeout_seconds = 600
-```
-
-使用可能なplaceholderは`{prompt}`、`{prompt_file}`、`{workspace}`、`{task_id}`、`{run_id}`、`{result_dir}`です。配列の1要素は展開後も1つのargv値なので、shell metacharacterはデータのままです。未知のplaceholder、空command、NUL、親directory traversalは拒否します。相対commandは各detached worktree内で解決します。credentialを設定へ書かないでください。promptとsecretらしいcommand値は永続command auditからredactしますが、stdout、stderr、patchなどに秘密が含まれる可能性は残ります。
-
-## Agent Doctor
-
-`patcharena agent doctor codex`（または`claude`、`gemini`、custom ID）で、command/version、redact済みargv、設定、detached worktreeを診断します。credential file、token、環境変数の値は読み取ったり表示したりしません。認証の最終判定は実行時の各CLIが行います。
-
-## Battle
-
-```bash
-patcharena battle \
-  --task csv-newline-regression \
-  --agents codex,claude,gemini \
-  --repeat 1
-```
-
-battleはタスクを1回読み、agent IDを検証し、commit済みbaseを固定して、独立したdetached worktreeで順番に実行します。setupとverifyは全agentで同一です。通常の`result.json`とgroup recordを証拠として残し、`.patcharena/battles/<battle-id>.json`はそれらのIDと部分失敗を別途記録します。1 agentの失敗後も後続を続行します。scoreやwinnerは決定しません。
-
-## 公平性
-
-同じtask、base commit、limit、setup、verifyは比較可能性を高めますが、異なるagentを本質的に同一条件にはしません。CLI/model version、設定、credential、network、cache、toolchain、rate limitを管理し、用途に合う反復数を使い、失敗試行も確認してください。普遍的ランキングではなく、raw methodologyと条件を公開することを推奨します。
-
-## SemVerと結果schema互換性
-
-PatchArenaのapplication releaseはSemVerに従います。加算的機能はminor、互換修正はpatch、互換性のないCLI/API変更はmajor releaseです。`schema_version`は別契約で、v0.3.0でも`1`を維持します。既存のschema-1 run/group証拠は引き続き読み込めます。battle summary、suite定義、suite execution checkpointは、それぞれ検証済みschemaとapplication-version contextを持ちます。
+レポートは成功率、実行時間、変更規模、検証内容、失敗、禁止操作、試行ごとの証拠を表示します。PatchArena自身は勝者や統計的有意性を判定しません。
 
 ## セキュリティ
 
-detached worktreeは反復性を改善し、primary checkoutの意図しない変更を減らします。timeout、出力上限、環境変数allowlist、path validation、policy checkも一般的な失敗を減らします。ただしlinked worktreeはGit object、ref、repository設定をprimary repositoryと共有します。Git metadataと禁止pathの一部を実行後に比較しますが、これは上限付きの事後検出であり、filesystemやGitのsecurity boundaryではありません。
+Git worktreeは試行の再現性を高め、主要な作業ディレクトリへの意図しない変更を減らします。ただし、Git object、ref、リポジトリ設定を共有するため、ファイルシステムやGitのセキュリティ境界にはなりません。
 
-Unixではsetup、agent、verify processを個別のprocess groupで実行します。timeout時とdirect childの通常終了後に残存group memberの終了を試みます。別sessionやprocess groupへ離脱した子孫は残る可能性があります。native Windowsでは現在direct childのみを終了し、Job Objectは使用していません。
+信頼できないタスク、リポジトリ、エージェントを実行する場合は、次の隔離を別に用意してください。
 
-信頼できないbenchmarkには、権限のない専用ユーザー、cleanなhome、credentialやagent socketなし、network制御、OS resource制限を設定した一時VMまたはcontainerを利用してください。禁止操作検出は監査可能な多層防御であり、実行防止を保証しません。run artifactにはsource、prompt、URL、環境由来text、その他の秘密が含まれる可能性があります。
+- 権限を持たない専用ユーザー。
+- 空のホームディレクトリ。
+- 認証情報やエージェントソケットを置かない環境。
+- ネットワーク制限。
+- CPU、メモリ、プロセス数を制限した一時VMまたはコンテナ。
 
-脆弱性の報告は[SECURITY.md](SECURITY.md)、前提と残存riskは[docs/threat-model.md](docs/threat-model.md)を参照してください。
+禁止操作の検出は、実行後に確認できる証拠を増やすための機能です。危険な操作の実行そのものを完全に防ぐものではありません。
 
-## セキュリティ上の制限
+脆弱性は[SECURITY.md](SECURITY.md)の手順で報告してください。前提と残る危険性は[docs/threat-model.md](docs/threat-model.md)に記載しています。
 
-- Claude CodeとGemini CLI adapterはCIでargvを検証するが、認証済みend-to-end runは任意で、各CLIのlocal導入が必要
-- 主対象はLinux / WSL2で、native Windowsのworktreeとprocess treeは継続的にテストしていない
-- Git worktreeと事後checkはfilesystem、process、network sandboxではない
-- Unixのprocess-group cleanupはbest effortで、離脱した子孫が残る可能性がある。Windowsはdirect childのみ終了
-- CPU、memory、process数、network traffic、child processが直接書き込むfile sizeは制限しない
-- 内部Git subprocessには独立timeoutがない
-- Git ignore対象fileや未初期化submoduleの内容はdiff証拠に含まれない。禁止path snapshotにも件数・容量上限がある
-- policy matchingでは間接的または意味的に等価な危険操作をすべて認識できない
-- task commandは引用付き引数に対応するが、shellを明示しない限り一般的なshell構文には対応しない
-- reportはlocal artifactのみで、hosted dashboardやremote result serviceはない
-- benchmark identityは`HEAD`、task、有効PatchArena policyを固定するが、完全な実行環境は固定しない
-
-## ロードマップ
-
-- native Windows Job Object、離脱したUnix子孫への対策、container profile
-- worktree lifecycleが安定した後のnative Windows CI
-- credentialをCIへ要求しない、任意の認証済みadapter smoke test拡充
-- instructions on/off比較の実験metadata改善
-- schema migrationと統計summaryの拡充
-- artifact retentionとopt-in redaction
-
-ロードマップは予定であり、releaseを約束するものではありません。
-
-## コントリビューション
-
-issueと焦点を絞ったpull requestを歓迎します。変更前に[CONTRIBUTING.md](CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)、[AGENTS.md](AGENTS.md)、[architecture](docs/architecture.md)、[threat model](docs/threat-model.md)を確認してください。security reportは公開issueではなく[SECURITY.md](SECURITY.md)に従ってください。
-
-最低限、次を実行します。
+## 開発
 
 ```bash
 cargo fmt --all -- --check
@@ -355,8 +213,8 @@ cargo test --locked --workspace --all-features
 cargo build --locked --workspace --release
 ```
 
-API key、実run log、`.env`、生成された`.patcharena`データ、再現可能なrecordで裏付けられていないbenchmark claimを含めないでください。利用者に見える変更は[CHANGELOG.md](CHANGELOG.md)の`Unreleased`へ記録します。
+変更前に[CONTRIBUTING.md](CONTRIBUTING.md)、[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)、[AGENTS.md](AGENTS.md)、[architecture](docs/architecture.md)、[threat model](docs/threat-model.md)を確認してください。
 
 ## ライセンス
 
-[Apache License 2.0](LICENSE)で提供します。
+[Apache License 2.0](LICENSE)で公開しています。
