@@ -2,7 +2,7 @@ name: Security
 
 on:
   push:
-    branches: [main, maintenance/add-security-ci-20260815]
+    branches: [main]
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
