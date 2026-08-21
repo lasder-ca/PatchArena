@@ -1327,9 +1327,15 @@ pub fn benchmark_identity(
     for path in merge_paths(&settings.forbidden_paths, &task.forbidden.paths) {
         hash_field(&mut hasher, path.as_os_str().as_encoded_bytes());
     }
+    let digest = hasher.finalize();
+    let mut task_fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        std::fmt::Write::write_fmt(&mut task_fingerprint, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
     Ok(BenchmarkIdentity {
         repository_commit,
-        task_fingerprint: format!("{:x}", hasher.finalize()),
+        task_fingerprint,
     })
 }
 
