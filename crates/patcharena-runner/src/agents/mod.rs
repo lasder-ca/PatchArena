@@ -18,7 +18,13 @@ pub(crate) fn configuration_hash(parts: &[&str]) -> String {
         hash.update(part.len().to_le_bytes());
         hash.update(part.as_bytes());
     }
-    format!("{:x}", hash.finalize())
+    let digest = hash.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        std::fmt::Write::write_fmt(&mut output, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    output
 }
 
 #[cfg(test)]

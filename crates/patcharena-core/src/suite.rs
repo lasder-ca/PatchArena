@@ -207,7 +207,13 @@ impl SuiteDefinition {
             path: serialization_path("suite fingerprint JSON"),
             source,
         })?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        let digest = Sha256::digest(bytes);
+        let mut fingerprint = String::with_capacity(digest.len() * 2);
+        for byte in digest.iter() {
+            fmt::Write::write_fmt(&mut fingerprint, format_args!("{byte:02x}"))
+                .expect("writing to a String cannot fail");
+        }
+        Ok(fingerprint)
     }
 
     /// Read and validate a bounded regular suite YAML file.
